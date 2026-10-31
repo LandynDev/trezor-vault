@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>trezor-vault signer</title>
+  <style>
+    body { font: 14px ui-monospace, monospace; max-width: 860px; margin: 2rem auto; padding: 0 1rem; }
+    pre { background: #f4f4f4; padding: 1rem; white-space: pre-wrap; word-break: break-all; }
+    button { font: inherit; padding: .6rem 1.2rem; }
+    .err { color: #b00; }
+  </style>
+</head>
+<body>
+  <h2>Check, then sign with Trezor</h2>
+  <pre id="summary"></pre>
+  <p>From: <b id="from"></b> · To: <b id="to"></b> · Chain: <b id="chain"></b></p>
+  <button id="go">Sign with MetaMask / Trezor</button>
+  <p id="status"></p>
+  <script>
+    const job = /*JOB*/null;
+    const $ = (id) => document.getElementById(id);
+    const status = (msg, err) => { $('status').textContent = msg; $('status').className = err ? 'err' : ''; };
+    $('summary').textContent = job.summary;
+    $('from').textContent = job.from;
+    $('to').textContent = job.to;
+    $('chain').textContent = job.chainId;
+
+    $('go').onclick = async () => {
+      try {
+        if (!window.ethereum) throw new Error('MetaMask not found');
+        const [account] = await ethereum.request({ method: 'eth_requestAccounts' });
+        if (account.toLowerCase() !== job.from.toLowerCase()) throw new Error(`MetaMask account ${account} is not ${job.from}`);
+        const hexChain = '0x' + job.chainId.toString(16);
+        await ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hexChain }] });
+        const chainId = parseInt(await ethereum.request({ method: 'eth_chainId' }), 16);
+        if (chainId !== job.chainId) throw new Error(`MetaMask is on chain ${chainId}, expected ${job.chainId}`);
+        status('Confirm on the Trezor screen…');
+        const hash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: account, to: job.to, data: job.data, value: job.value, chainId: hexChain }] });
+        await fetch(`/tx/${job.token}`, { method: 'POST', body: JSON.stringify({ hash }) });
+        $('go').disabled = true;
+        status(`Sent ${hash}. Back to the terminal.`);
+      } catch (e) {
+        status(e.message, true);
+      }
+    };
+  </script>
+</body>
+</html>
