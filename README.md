@@ -26,6 +26,11 @@ All commands take `--net test|main` (default `test`).
 | `node vault.mjs pending --signers a,b,c [--threshold 2]` | List open multisig calls |
 | `node vault.mjs sign --from <h160> --signer <proxy> --signers a,b,c --transfer-to <ss58> --amount <tao>` | Open or approve a transfer |
 | `node vault.mjs sign … --call <0xhex>` | Same, for any call |
+| `node vault.mjs sign … --create-vault [--index 0]` | Spawn a pure proxy that the multisig controls. Record the printed height, extIndex and index. |
+| `node vault.mjs sign … --proxy-for <ss58> …` | Run the call as that pure proxy (`Proxy.proxy` inside `as_multi`, same call hash as btcli) |
+| `node vault.mjs sign … --proxy-for <ss58> --add-delegate <ss58>` | Add an Any, delay 0 delegate to the pure proxy |
+| `node vault.mjs sign … --proxy-for <ss58> --remove-delegate <ss58>` | Remove one. Refuses to remove the last Any, delay 0 delegate. |
+| `node vault.mjs delegates <ss58>` | Delegates (type, delay) and free balance of an account |
 
 `create-signer` and `sign` print a local URL. Open it in a browser with MetaMask, check the summary, then sign on the Trezor.
 
@@ -36,4 +41,6 @@ All commands take `--net test|main` (default `test`).
 | The call hash matches the one the other signatories see | It proves that all signers approve the same call |
 | After `create-signer`, the proxy's delegate list (polkadot.js apps or an explorer) shows only the mirror | A second delegate could sign in the Trezor's place |
 | `sign` refuses a proxy with any delegate other than the mirror | Built in |
+| `sign --proxy-for` refuses unless the multisig is an Any, delay 0 delegate of the pure proxy. It warns on any extra delegate. | Every delegate can move the funds |
+| `sign` fails if the multisig call or any proxied call inside it returns an error | A failed inner call still reports `MultisigExecuted Ok` |
 | The mined EVM tx must match the job: from, to, data, chain, value 0 | Built in |

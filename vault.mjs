@@ -2,8 +2,8 @@
 import { parseArgs } from 'node:util';
 import { encodeAddress } from '@polkadot/util-crypto';
 import {
-  PROXY_PRECOMPILE, PROXY_TYPE_ANY, SS58, buildAsMulti, connect, createPureProxyData, describeCall,
-  findPureCreated, mirrorOf, multisigAddress, proxyCallData, raoToTao, ss58Of, taoToRao,
+  PROXY_PRECOMPILE, SS58, buildAsMulti, connect, createPureProxyData, describeCall,
+  findPureCreated, mirrorOf, multisigAddress, proxiesOf, proxyCallData, raoToTao, ss58Of, taoToRao,
 } from './chain.mjs';
 import { send } from './send.mjs';
 
@@ -12,9 +12,13 @@ const USAGE = `usage: node vault.mjs <command> [--net test|main]
   address --signers a,b,c [--threshold 2]               multisig (vault) address
   create-signer --from <h160> [--index 0]               spawn the Trezor's pure proxy (trezor-signer)
   pending --signers a,b,c [--threshold 2]               list open vault calls
-  sign --from <h160> --signer <trezor-signer> --signers a,b,c [--threshold 2]
-       (--transfer-to <ss58> --amount <tao> | --call <0xhex>)
-                                                        open/approve a vault call through the Trezor`;
+  delegates <ss58>                                      proxies and free balance of an account
+  sign --from <h160> --signer <trezor-signer> --signers a,b,c [--threshold 2] [--proxy-for <ss58>]
+       (--transfer-to <ss58> --amount <tao> | --create-vault [--index 0] |
+        --add-delegate <ss58> | --remove-delegate <ss58> | --call <0xhex>)
+                                                        open/approve a vault call through the Trezor
+                                                        --proxy-for: run the call as a pure proxy the multisig controls
+                                                        --create-vault: spawn such a pure proxy from the multisig`;
 
 const { positionals, values: opt } = parseArgs({
   allowPositionals: true,
@@ -22,6 +26,8 @@ const { positionals, values: opt } = parseArgs({
     net: { type: 'string', default: 'test' }, from: { type: 'string' },
     index: { type: 'string', default: '0' }, signers: { type: 'string' }, threshold: { type: 'string', default: '2' },
     signer: { type: 'string' }, 'transfer-to': { type: 'string' }, amount: { type: 'string' }, call: { type: 'string' },
+    'proxy-for': { type: 'string' }, 'create-vault': { type: 'boolean' },
+    'add-delegate': { type: 'string' }, 'remove-delegate': { type: 'string' },
   },
 });
 
@@ -32,21 +38,38 @@ const need = (name) => {
 const signersOpt = () => need('signers').split(',').map((s) => ss58Of(s.trim()));
 const thresholdOpt = () => Number(opt.threshold);
 
-const assertAnyDelegate = async (api, real, delegate) => {
-  const [proxies] = await api.query.proxy.proxies(real);
-  const [p] = proxies;
-  // Exactly one delegate: any extra delegate could vote in the Trezor's seat.
-  const ok = proxies.length === 1 && encodeAddress(p.delegate, SS58) === delegate && p.proxyType.index === PROXY_TYPE_ANY && p.delay.isZero();
-  if (!ok) throw new Error(`${real} must have exactly one proxy: ${delegate} (Any, delay 0). Found: ${JSON.stringify(proxies.toHuman())}`);
+const innerCalls = {
+  'transfer-to': (api) => api.tx.balances.transferKeepAlive(ss58Of(opt['transfer-to']), taoToRao(need('amount'))),
+  'create-vault': (api) => api.tx.proxy.createPure('Any', 0, Number(opt.index)),
+  'add-delegate': (api) => api.tx.proxy.addProxy(ss58Of(opt['add-delegate']), 'Any', 0),
+  'remove-delegate': (api) => api.tx.proxy.removeProxy(ss58Of(opt['remove-delegate']), 'Any', 0),
+  call: (api) => api.tx(api.createType('Call', opt.call)),
 };
 
-const reportMultisig = async (api, blockNumber, vault) => {
+const delegateLine = (p) => `${p.delegate} (${p.type}, delay ${p.delay})`;
+
+const assertAnyDelegate = async (api, real, delegate) => {
+  const proxies = await proxiesOf(api, real);
+  // Exactly one delegate: any extra delegate could act in its place.
+  const ok = proxies.length === 1 && proxies[0].delegate === delegate && proxies[0].isAny;
+  if (!ok) throw new Error(`${real} must have exactly one proxy: ${delegate} (Any, delay 0). Found: ${proxies.map(delegateLine).join(', ') || 'none'}`);
+};
+
+// Returns true when this signature executed the call.
+const reportMultisig = async (api, blockNumber, { controller, signer, callHash }) => {
   const events = await (await api.at(await api.rpc.chain.getBlockHash(blockNumber))).query.system.events();
-  const mine = events.filter(({ event }) => event.section === 'multisig' && encodeAddress(event.data.multisig, SS58) === vault);
-  if (!mine.length) throw new Error(`no multisig event for ${vault} in block ${blockNumber}`);
+  const mine = events.filter(({ event }) =>
+    event.section === 'multisig' && encodeAddress(event.data.multisig, SS58) === controller &&
+    event.data.approving?.eq(signer) && event.data.callHash.toHex() === callHash);
+  if (!mine.length) throw new Error(`no multisig event for ${controller} by ${signer} in block ${blockNumber}`);
   for (const { event } of mine) console.log(`${event.method} ${JSON.stringify(event.data.toHuman())}`);
   const failed = mine.find(({ event }) => api.events.multisig.MultisigExecuted.is(event) && event.data.result.isErr);
   if (failed) throw new Error(`vault call executed but FAILED: ${failed.event.data.result.toString()}`);
+  // A failed inner call still yields MultisigExecuted Ok; its ProxyExecuted carries the error.
+  const failedProxy = events.find(({ phase, event }) =>
+    phase.eq(mine[0].phase) && api.events.proxy.ProxyExecuted.is(event) && event.data.result.isErr);
+  if (failedProxy) throw new Error(`proxied call FAILED: ${failedProxy.event.data.result.toString()}`);
+  return mine.some(({ event }) => api.events.multisig.MultisigExecuted.is(event));
 };
 
 const commands = {
@@ -86,35 +109,73 @@ const commands = {
     }
   },
 
+  delegates: async ([account]) => {
+    if (!account) throw new Error(`<ss58> is required\n\n${USAGE}`);
+    const real = ss58Of(account);
+    const api = await connect(opt.net);
+    try {
+      const proxies = await proxiesOf(api, real);
+      const { data } = await api.query.system.account(real);
+      console.log(`${real}: ${raoToTao(data.free)} TAO free, ${proxies.length} delegates`);
+      for (const p of proxies) console.log(`- ${delegateLine(p)}`);
+    } finally {
+      await api.disconnect();
+    }
+  },
+
   sign: async () => {
     const from = need('from');
     const signer = ss58Of(need('signer'));
     const signers = signersOpt();
     const threshold = thresholdOpt();
     if (!signers.includes(signer)) throw new Error(`--signer ${signer} is not in --signers`);
+    const kinds = Object.keys(innerCalls).filter((k) => opt[k]);
+    if (kinds.length !== 1) throw new Error(`give exactly one of ${Object.keys(innerCalls).map((k) => `--${k}`).join(', ')}\n\n${USAGE}`);
+    const [kind] = kinds;
+    const real = opt['proxy-for'] && ss58Of(opt['proxy-for']);
+    if (kind === 'create-vault' && real) throw new Error('--create-vault is not allowed with --proxy-for');
+    if (kind.endsWith('-delegate') && !real) throw new Error(`--${kind} requires --proxy-for`);
+    const controller = multisigAddress(signers, threshold);
     const api = await connect(opt.net);
     try {
       await assertAnyDelegate(api, signer, mirrorOf(from));
-      const call = opt.call
-        ? api.tx(api.createType('Call', opt.call))
-        : api.tx.balances.transferKeepAlive(ss58Of(need('transfer-to')), taoToRao(need('amount')));
-      const { vault, callHash, pending, asMulti } = await buildAsMulti(api, { signers, threshold, signer, call });
+      const delegates = real ? await proxiesOf(api, real) : [];
+      const holdsAny = (who) => delegates.some((p) => p.isAny && p.delegate === who);
+      if (real && !holdsAny(controller)) throw new Error(`${controller} is not an Any, delay 0 delegate of ${real}`);
+      if (kind === 'remove-delegate') {
+        const leaving = ss58Of(opt[kind]);
+        if (!holdsAny(leaving)) throw new Error(`${leaving} is not an Any, delay 0 delegate of ${real}`);
+        // A pure proxy has no key: with no Any delegate left, its funds are lost forever.
+        if (!delegates.some((p) => p.isAny && p.delegate !== leaving)) throw new Error(`refusing: ${leaving} is the last Any, delay 0 delegate of ${real}`);
+      }
+      const inner = innerCalls[kind](api);
+      const call = real ? api.tx.proxy.proxy(real, null, inner) : inner;
+      const { callHash, pending, asMulti } = await buildAsMulti(api, { signers, threshold, signer, call });
       const approvals = pending ? pending.approvals.length : 0;
       const action = approvals + 1 >= threshold ? 'EXECUTE' : pending ? 'APPROVE' : 'OPEN';
       if (!pending) console.warn('warning: no open call found; the Trezor signer will open it and pay the deposit');
       const summary = [
-        `vault      ${vault} (${threshold}-of-${signers.length})`,
+        `controller ${controller} (${threshold}-of-${signers.length} multisig)`,
+        real && `real       ${real} (the call runs as this account)`,
+        real && `delegates  ${delegates.map(delegateLine).join(', ')}`,
+        delegates.length > 1 && `WARNING    ${real} has ${delegates.length} delegates; EACH ONE can move its funds`,
         `signers    ${signers.join(', ')}`,
         `signing as ${signer} (trezor-signer)`,
         `action     ${action} (${approvals}/${threshold} approvals before this)`,
         `timepoint  ${pending ? `${pending.when.height}-${pending.when.index}` : 'none (opens new call)'}`,
         `call hash  ${callHash}   <- must match the other signer`,
-        `call       ${describeCall(call)}`,
-        opt.call ? '' : `amount     ${raoToTao(taoToRao(opt.amount))} TAO`,
-      ].join('\n');
+        `call       ${describeCall(inner)}`,
+        kind === 'transfer-to' && `amount     ${raoToTao(taoToRao(opt.amount))} TAO`,
+      ].filter(Boolean).join('\n');
       console.log(summary);
       const receipt = await send({ net: opt.net, from, to: PROXY_PRECOMPILE, data: proxyCallData(signer, asMulti), summary });
-      await reportMultisig(api, receipt.blockNumber, vault);
+      const executed = await reportMultisig(api, receipt.blockNumber, { controller, signer, callHash });
+      if (kind !== 'create-vault') return;
+      if (!executed) return console.log('\nvault not created yet: RECORD THIS prints for the executing signer');
+      const { pure: vault, ...created } = await findPureCreated(api, receipt.blockNumber, controller, Number(opt.index));
+      await assertAnyDelegate(api, vault, controller);
+      console.log('\nRECORD THIS (needed to kill it later):');
+      console.log(JSON.stringify({ vault, controller, ...created }, null, 2));
     } finally {
       await api.disconnect();
     }

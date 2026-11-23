@@ -52,6 +52,17 @@ export const raoToTao = (rao) => {
   return `${r / RAO}.${(r % RAO).toString().padStart(9, '0')}`;
 };
 
+// isAny: full control with no delay.
+export const proxiesOf = async (api, account) => {
+  const [proxies] = await api.query.proxy.proxies(account);
+  return proxies.map((p) => ({
+    delegate: encodeAddress(p.delegate, SS58),
+    type: p.proxyType.toString(),
+    delay: p.delay.toNumber(),
+    isAny: p.proxyType.index === PROXY_TYPE_ANY && p.delay.isZero(),
+  }));
+};
+
 export const pendingMultisig = async (api, vault, callHash) => {
   const entry = await api.query.multisig.multisigs(vault, callHash);
   return entry.isSome ? entry.unwrap() : null;
