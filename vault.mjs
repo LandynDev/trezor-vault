@@ -2,8 +2,8 @@
 import { parseArgs } from 'node:util';
 import { encodeAddress } from '@polkadot/util-crypto';
 import {
-  PROXY_PRECOMPILE, PROXY_TYPE_ANY, SS58, buildAsMulti, callArgs, callTree, connect, createPureProxyData, describeCall,
-  findOpenedCall, findPureCreated, mirrorOf, multisigAddress, pendingCalls, proxiedReal, proxiesOf, proxyCallData,
+  PROXY_PRECOMPILE, PROXY_TYPE_ANY, SS58, buildAsMulti, callParts, callTree, connect, createPureProxyData, describeCall,
+  findOpenedCall, findPureCreated, mirrorOf, multisigAddress, pendingCalls, proxiesOf, proxyCallData,
   raoToTao, ss58Of, taoToRao,
 } from './chain.mjs';
 import { loadVault, vaultFlags } from './config.mjs';
@@ -72,7 +72,7 @@ const checkAccounts = async (api, { from, signer, controller, real, inner }) => 
   for (const { call } of real ? callTree(inner) : []) {
     if (api.tx.proxy.removeProxies.is(call)) throw new Error(`refusing: proxy.removeProxies removes every delegate of ${real}`);
     if (!api.tx.proxy.removeProxy.is(call) || call.args[1].index !== PROXY_TYPE_ANY || !call.args[2].isZero()) continue;
-    const leaving = callArgs(call)[0].address;
+    const [leaving] = callParts(call).args[0].addresses;
     if (!holdsAny(leaving)) throw new Error(`${leaving} is not an Any, delay 0 delegate of ${real}`);
     // A pure proxy has no key: with no Any delegate left, its funds are lost forever.
     if (!delegates.some((p) => p.isAny && p.delegate !== leaving)) throw new Error(`refusing: ${leaving} is the last Any, delay 0 delegate of ${real}`);
@@ -93,7 +93,7 @@ const callName = (call) => `${call.section}.${call.method}`;
 // One line per call level: pallet.method(arg=value, …).
 const callLines = (call, labels) =>
   [...callTree(call)].map(({ call: c, depth }) =>
-    `${'  '.repeat(depth)}${callName(c)}(${callArgs(c).map((a) => `${a.name}=${a.address ? labelled(a.address, labels) : a.text}`).join(', ')})`);
+    `${'  '.repeat(depth)}${callName(c)}(${callParts(c, (address) => labelled(address, labels)).args.map((a) => `${a.name}=${a.text}`).join(', ')})`);
 
 const CONTROL_CALLS = ['proxy.addProxy', 'proxy.removeProxy', 'proxy.removeProxies', 'proxy.killPure', 'multisig.cancelAsMulti', 'balances.transferAll', 'balances.transferAllowDeath'];
 
@@ -103,8 +103,8 @@ const callWarnings = (call, { real, vault, labels }) => {
     !real && 'the call is NOT wrapped in proxy.proxy: it runs as the multisig itself, not as the vault',
     real && real !== vault && `the call runs as ${real}, which is NOT the configured vault ${vault ?? '(none given)'}`,
     ...calls.filter((c) => CONTROL_CALLS.includes(callName(c))).map((c) => `${callName(c)} changes who controls the account or moves its whole balance`),
-    ...calls.flatMap((c) => callArgs(c).filter((a) => a.address && !labels.has(a.address))
-      .map((a) => `unknown address ${a.address} (${callName(c)} ${a.name}): check every character`)),
+    ...calls.flatMap((c) => callParts(c).args.flatMap((a) => a.addresses.filter((address) => !labels.has(address))
+      .map((address) => `unknown address ${address} (${callName(c)} ${a.name}): check every character`))),
   ].filter(Boolean);
 };
 
@@ -269,7 +269,8 @@ const commands = {
       if (found.hash.toHex() !== callHash) throw new Error(`--call has hash ${found.hash.toHex()}; the pending call is ${callHash}`);
       // Decode again with the current runtime: that is what executes.
       const call = api.tx(api.createType('Call', found.toHex()));
-      const real = proxiedReal(api, call.method);
+      const [{ real }] = callTree(call.method);
+      if (real === null) throw new Error('proxy.proxy real must be a plain account id');
       const inner = real ? call.method.args[2] : call.method;
       const delegates = await checkAccounts(api, { from, signer, controller, real, inner });
       const [first, ...rest] = callLines(call.method, labels);

@@ -110,43 +110,69 @@ export const findPureCreated = async (api, blockNumber, spawner, index) => {
   };
 };
 
-const isCall = (arg) => arg?.callIndex instanceof Uint8Array && !!arg.section;
-const callsIn = (arg) => (isCall(arg) ? [arg] : Array.isArray(arg) && arg.length && arg.every(isCall) ? [...arg] : []);
+const isCall = (value) => value?.callIndex instanceof Uint8Array && !!value.section;
+const isAccount = (value) => value instanceof Uint8Array && value.length === 32 && value.toRawType?.() === 'AccountId';
 
-// The call, then every call nested in it (proxy.proxy, as_multi, batch, …), each with its depth.
-export function* callTree(call, depth = 0) {
-  yield { call, depth };
-  for (const arg of call.args) for (const child of callsIn(arg)) yield* callTree(child, depth + 1);
-}
+const plain = (value) => {
+  const json = value.toJSON();
+  return typeof json === 'string' && json ? json : JSON.stringify(json);
+};
 
-const addressOf = (arg, type) =>
-  type === 'AccountId32' ? encodeAddress(arg, SS58) : type === 'MultiAddress' && arg.type === 'Id' ? encodeAddress(arg.value, SS58) : null;
+// Renders a value in full, by type. Reports every account id and every call inside it.
+const render = (value, found, label) => {
+  const all = (items) => items.map((item) => render(item, found, label)).join(', ');
+  if (isCall(value)) return found.calls.push(value) && '<call below>';
+  if (isAccount(value)) {
+    const address = encodeAddress(value, SS58);
+    found.addresses.push(address);
+    return label(address);
+  }
+  if (value.isNone === true) return 'null';
+  // Option, Compact and decoded wrappers hold one value.
+  if (typeof value.unwrap === 'function' && value.isDecoded !== false) return render(value.unwrap(), found, label);
+  if (value instanceof Map) return `{${[...value].map(([key, item]) => `${typeof key === 'string' ? key : render(key, found, label)}: ${render(item, found, label)}`).join(', ')}}`;
+  if (value instanceof Set || Array.isArray(value)) return `[${all([...value])}]`;
+  if (typeof value.type === 'string' && typeof value.index === 'number' && value.value?.toRawType) {
+    if (value.type === 'Id' && isAccount(value.value)) return render(value.value, found, label);
+    return value.isBasic || value.value.toRawType() === 'Null' ? value.type : `${value.type}(${render(value.value, found, label)})`;
+  }
+  return plain(value);
+};
 
-const MAX_ARG_TEXT = 200;
-
-// One entry per argument that is not a nested call. Balances show as 9-decimal units and raw.
-export const callArgs = (call) =>
-  call.args.flatMap((arg, i) => {
-    if (callsIn(arg).length) return [];
+// args: one entry per argument that is not purely calls, shown in full. calls: every call nested in the arguments.
+// Balances show as 9-decimal units and raw.
+export const callParts = (call, label = (address) => address) => {
+  const calls = [];
+  const args = call.args.flatMap((arg, i) => {
     const { name, type, typeName } = call.meta.args[i];
     const hint = `${typeName} ${name}`;
-    const address = addressOf(arg, type.toString());
+    const found = { calls, addresses: [] };
     const isBalance = /^(Compact<)?u(64|128)>?$/.test(type.toString()) && /balance|currency|amount|value|price/i.test(hint);
-    const json = arg.toJSON();
-    const plain = typeof json === 'string' ? json : JSON.stringify(json);
-    const text = address ?? (isBalance
+    const text = isBalance
       ? `${raoToTao(arg.toString())} ${/alpha|unstaked/i.test(hint) ? 'alpha' : 'TAO'} (${arg.toString()} rao)`
-      : plain.length > MAX_ARG_TEXT ? `${plain.slice(0, MAX_ARG_TEXT)}… (${plain.length} chars)` : plain);
-    return [{ name: name.toString(), address, text }];
+      : render(arg, found, label);
+    const onlyCalls = isCall(arg) || (Array.isArray(arg) && arg.length > 0 && arg.every(isCall));
+    return onlyCalls ? [] : [{ name: name.toString(), text, addresses: found.addresses }];
   });
-
-// The account a proxy.proxy call runs as; null when the call is not proxied.
-export const proxiedReal = (api, call) => {
-  if (!api.tx.proxy.proxy.is(call)) return null;
-  const real = addressOf(call.args[0], 'MultiAddress');
-  if (!real) throw new Error('proxy.proxy real must be a plain account id');
-  return real;
+  return { args, calls };
 };
+
+export const callName = (call) => `${call.section}.${call.method}`;
+
+// The account a proxy.proxy call runs its inner call as; null when it is not a plain account id.
+const realOf = (call) => (call.args[0].type === 'Id' ? encodeAddress(call.args[0].value, SS58) : null);
+
+const KEEPS_ORIGIN = ['utility.batch', 'utility.batchAll', 'utility.forceBatch'];
+
+// The call, then every call nested in it, each with its depth and the account it runs as.
+// origin is null when this tool cannot tell. real is set on proxy.proxy only.
+export function* callTree(call, origin = null, depth = 0) {
+  const isProxy = callName(call) === 'proxy.proxy';
+  const real = isProxy ? realOf(call) : undefined;
+  yield { call, origin, depth, real };
+  const inner = isProxy ? real : KEEPS_ORIGIN.includes(callName(call)) ? origin : null;
+  for (const child of callParts(call).calls) yield* callTree(child, inner, depth + 1);
+}
 
 // The pending entry stores only the call hash; the opener's as_multi extrinsic carries the full call.
 export const findOpenedCall = async (api, when, callHash) => {
