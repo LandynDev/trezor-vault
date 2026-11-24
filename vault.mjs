@@ -125,7 +125,7 @@ const callWarnings = (call, { controller, vault, labels }) => {
 const pendingLine = async (api, { callHash, op }, labels) => {
   const call = await findOpenedCall(api, op.when, callHash);
   const head = `- hash ${callHash} opened at ${op.when.height}-${op.when.index} by ${labelled(encodeAddress(op.depositor, SS58), labels)}, ${op.approvals.length} approvals`;
-  return `${head}\n  ${call ? callLines(call, labels).map((line) => line.trim()).join(' > ') : 'call data is not on chain'}`;
+  return `${head}\n  ${call ? callLines(call, labels).map((line) => line.trim()).join(' > ') : 'call data not found on chain'}`;
 };
 
 // Names a module error (pallet.Error) when the runtime knows it.
@@ -288,7 +288,7 @@ const commands = {
       }
       const [{ callHash, op }] = wanted;
       const found = opt.call ? api.createType('Call', opt.call) : await findOpenedCall(api, op.when, callHash);
-      if (!found) throw new Error(`the call data of ${callHash} is not on chain (block ${op.when.height}, extrinsic ${op.when.index}).\nThe opener used the MEV shield or approve_as_multi. Open the call again with --no-mev-shield on btcli, or pass --call <0xhex>.`);
+      if (!found) throw new Error(`the call data of ${callHash} was not found on chain (block ${op.when.height}, extrinsic ${op.when.index}).\nPossible causes: the opener used the MEV shield, used approve_as_multi (hash only), or is a Trezor signer (the call is inside an EVM transaction).\nPass --call <0xhex>, or cancel the call and open it again with btcli and --no-mev-shield.`);
       if (found.hash.toHex() !== callHash) throw new Error(`--call has hash ${found.hash.toHex()}; the pending call is ${callHash}`);
       // Decode again with the current runtime: that is what executes.
       const call = api.tx(api.createType('Call', found.toHex()));
