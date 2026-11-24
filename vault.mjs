@@ -2,8 +2,8 @@
 import { parseArgs } from 'node:util';
 import { encodeAddress } from '@polkadot/util-crypto';
 import {
-  PROXY_PRECOMPILE, SS58, buildAsMulti, connect, createPureProxyData, describeCall,
-  findPureCreated, mirrorOf, multisigAddress, proxiesOf, proxyCallData, raoToTao, ss58Of, taoToRao,
+  PROXY_PRECOMPILE, PROXY_TYPE_ANY, SS58, buildAsMulti, callArgs, callTree, connect, createPureProxyData, describeCall,
+  findPureCreated, mirrorOf, multisigAddress, pendingCalls, proxiesOf, proxyCallData, raoToTao, ss58Of, taoToRao,
 } from './chain.mjs';
 import { send } from './send.mjs';
 
@@ -55,6 +55,30 @@ const assertAnyDelegate = async (api, real, delegate) => {
   if (!ok) throw new Error(`${real} must have exactly one proxy: ${delegate} (Any, delay 0). Found: ${proxies.map(delegateLine).join(', ') || 'none'}`);
 };
 
+// Checks every account the call depends on. Returns the delegates of `real`.
+const checkAccounts = async (api, { from, signer, controller, real, inner }) => {
+  await assertAnyDelegate(api, signer, mirrorOf(from));
+  const delegates = real ? await proxiesOf(api, real) : [];
+  const holdsAny = (who) => delegates.some((p) => p.isAny && p.delegate === who);
+  if (real && !holdsAny(controller)) throw new Error(`${controller} is not an Any, delay 0 delegate of ${real}`);
+  for (const { call } of real ? callTree(inner) : []) {
+    if (api.tx.proxy.removeProxies.is(call)) throw new Error(`refusing: proxy.removeProxies removes every delegate of ${real}`);
+    if (!api.tx.proxy.removeProxy.is(call) || call.args[1].index !== PROXY_TYPE_ANY || !call.args[2].isZero()) continue;
+    const leaving = callArgs(call)[0].address;
+    if (!holdsAny(leaving)) throw new Error(`${leaving} is not an Any, delay 0 delegate of ${real}`);
+    // A pure proxy has no key: with no Any delegate left, its funds are lost forever.
+    if (!delegates.some((p) => p.isAny && p.delegate !== leaving)) throw new Error(`refusing: ${leaving} is the last Any, delay 0 delegate of ${real}`);
+  }
+  return delegates;
+};
+
+// Names a module error (pallet.Error) when the runtime knows it.
+const errorText = (api, error) => {
+  if (!error.isModule) return error.toString();
+  const { section, name, docs } = api.registry.findMetaError(error.asModule);
+  return `${section}.${name} (${docs.join(' ').trim()})`;
+};
+
 // Returns true when this signature executed the call.
 const reportMultisig = async (api, blockNumber, { controller, signer, callHash }) => {
   const events = await (await api.at(await api.rpc.chain.getBlockHash(blockNumber))).query.system.events();
@@ -64,12 +88,37 @@ const reportMultisig = async (api, blockNumber, { controller, signer, callHash }
   if (!mine.length) throw new Error(`no multisig event for ${controller} by ${signer} in block ${blockNumber}`);
   for (const { event } of mine) console.log(`${event.method} ${JSON.stringify(event.data.toHuman())}`);
   const failed = mine.find(({ event }) => api.events.multisig.MultisigExecuted.is(event) && event.data.result.isErr);
-  if (failed) throw new Error(`vault call executed but FAILED: ${failed.event.data.result.toString()}`);
+  if (failed) throw new Error(`vault call executed but FAILED: ${errorText(api, failed.event.data.result.asErr)}`);
   // A failed inner call still yields MultisigExecuted Ok; its ProxyExecuted carries the error.
   const failedProxy = events.find(({ phase, event }) =>
     phase.eq(mine[0].phase) && api.events.proxy.ProxyExecuted.is(event) && event.data.result.isErr);
-  if (failedProxy) throw new Error(`proxied call FAILED: ${failedProxy.event.data.result.toString()}`);
+  if (failedProxy) throw new Error(`proxied call FAILED: ${errorText(api, failedProxy.event.data.result.asErr)}`);
   return mine.some(({ event }) => api.events.multisig.MultisigExecuted.is(event));
+};
+
+// Shows the summary, sends as_multi through the Trezor, then checks the result.
+const signAsMulti = async (api, { from, signer, signers, threshold, real, delegates, call, callSummary }) => {
+  const controller = multisigAddress(signers, threshold);
+  const { callHash, pending, asMulti } = await buildAsMulti(api, { signers, threshold, signer, call });
+  const approvals = pending ? pending.approvals.length : 0;
+  const action = approvals + 1 >= threshold ? 'EXECUTE' : pending ? 'APPROVE' : 'OPEN';
+  if (!pending) console.warn('warning: no open call found; the Trezor signer will open it and pay the deposit');
+  const summary = [
+    `controller ${controller} (${threshold}-of-${signers.length} multisig)`,
+    real && `real       ${real} (the call runs as this account)`,
+    real && `delegates  ${delegates.map(delegateLine).join(', ')}`,
+    delegates.length > 1 && `WARNING    ${real} has ${delegates.length} delegates; EACH ONE can move its funds`,
+    `signers    ${signers.join(', ')}`,
+    `signing as ${signer} (trezor-signer)`,
+    `action     ${action} (${approvals}/${threshold} approvals before this)`,
+    `timepoint  ${pending ? `${pending.when.height}-${pending.when.index}` : 'none (opens new call)'}`,
+    `call hash  ${callHash}   <- must match the other signer`,
+    ...callSummary,
+  ].filter(Boolean).join('\n');
+  console.log(summary);
+  const receipt = await send({ net: opt.net, from, to: PROXY_PRECOMPILE, data: proxyCallData(signer, asMulti), summary });
+  const executed = await reportMultisig(api, receipt.blockNumber, { controller, signer, callHash });
+  return { executed, receipt };
 };
 
 const commands = {
@@ -98,12 +147,10 @@ const commands = {
     const api = await connect(opt.net);
     try {
       const vault = multisigAddress(signersOpt(), thresholdOpt());
-      const entries = await api.query.multisig.multisigs.entries(vault);
-      console.log(`vault ${vault}: ${entries.length} pending`);
-      for (const [key, ms] of entries) {
-        const m = ms.unwrap();
-        console.log(`- hash ${key.args[1].toHex()} opened at ${m.when.height}-${m.when.index} by ${encodeAddress(m.depositor, SS58)}, ${m.approvals.length} approvals`);
-      }
+      const open = await pendingCalls(api, vault);
+      console.log(`vault ${vault}: ${open.length} pending`);
+      for (const { callHash, op } of open)
+        console.log(`- hash ${callHash} opened at ${op.when.height}-${op.when.index} by ${encodeAddress(op.depositor, SS58)}, ${op.approvals.length} approvals`);
     } finally {
       await api.disconnect();
     }
@@ -138,38 +185,11 @@ const commands = {
     const controller = multisigAddress(signers, threshold);
     const api = await connect(opt.net);
     try {
-      await assertAnyDelegate(api, signer, mirrorOf(from));
-      const delegates = real ? await proxiesOf(api, real) : [];
-      const holdsAny = (who) => delegates.some((p) => p.isAny && p.delegate === who);
-      if (real && !holdsAny(controller)) throw new Error(`${controller} is not an Any, delay 0 delegate of ${real}`);
-      if (kind === 'remove-delegate') {
-        const leaving = ss58Of(opt[kind]);
-        if (!holdsAny(leaving)) throw new Error(`${leaving} is not an Any, delay 0 delegate of ${real}`);
-        // A pure proxy has no key: with no Any delegate left, its funds are lost forever.
-        if (!delegates.some((p) => p.isAny && p.delegate !== leaving)) throw new Error(`refusing: ${leaving} is the last Any, delay 0 delegate of ${real}`);
-      }
       const inner = innerCalls[kind](api);
+      const delegates = await checkAccounts(api, { from, signer, controller, real, inner: inner.method });
       const call = real ? api.tx.proxy.proxy(real, null, inner) : inner;
-      const { callHash, pending, asMulti } = await buildAsMulti(api, { signers, threshold, signer, call });
-      const approvals = pending ? pending.approvals.length : 0;
-      const action = approvals + 1 >= threshold ? 'EXECUTE' : pending ? 'APPROVE' : 'OPEN';
-      if (!pending) console.warn('warning: no open call found; the Trezor signer will open it and pay the deposit');
-      const summary = [
-        `controller ${controller} (${threshold}-of-${signers.length} multisig)`,
-        real && `real       ${real} (the call runs as this account)`,
-        real && `delegates  ${delegates.map(delegateLine).join(', ')}`,
-        delegates.length > 1 && `WARNING    ${real} has ${delegates.length} delegates; EACH ONE can move its funds`,
-        `signers    ${signers.join(', ')}`,
-        `signing as ${signer} (trezor-signer)`,
-        `action     ${action} (${approvals}/${threshold} approvals before this)`,
-        `timepoint  ${pending ? `${pending.when.height}-${pending.when.index}` : 'none (opens new call)'}`,
-        `call hash  ${callHash}   <- must match the other signer`,
-        `call       ${describeCall(inner)}`,
-        kind === 'transfer-to' && `amount     ${raoToTao(taoToRao(opt.amount))} TAO`,
-      ].filter(Boolean).join('\n');
-      console.log(summary);
-      const receipt = await send({ net: opt.net, from, to: PROXY_PRECOMPILE, data: proxyCallData(signer, asMulti), summary });
-      const executed = await reportMultisig(api, receipt.blockNumber, { controller, signer, callHash });
+      const callSummary = [`call       ${describeCall(inner)}`, kind === 'transfer-to' && `amount     ${raoToTao(taoToRao(opt.amount))} TAO`];
+      const { executed, receipt } = await signAsMulti(api, { from, signer, signers, threshold, real, delegates, call, callSummary });
       if (kind !== 'create-vault') return;
       if (!executed) return console.log('\nvault not created yet: RECORD THIS prints for the executing signer');
       const { pure: vault, ...created } = await findPureCreated(api, receipt.blockNumber, controller, Number(opt.index));
@@ -180,6 +200,7 @@ const commands = {
       await api.disconnect();
     }
   },
+
 };
 
 const [cmd, ...rest] = positionals;
