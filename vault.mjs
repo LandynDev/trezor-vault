@@ -105,7 +105,9 @@ const callLines = (call, labels) =>
   [...callTree(call)].map(({ call: c, depth }) =>
     `${'  '.repeat(depth)}${callName(c)}(${callParts(c, (address) => labelled(address, labels)).args.map((a) => `${a.name}=${a.text}`).join(', ')})`);
 
-const CONTROL_CALLS = ['proxy.addProxy', 'proxy.removeProxy', 'proxy.removeProxies', 'proxy.killPure', 'multisig.cancelAsMulti', 'balances.transferAll', 'balances.transferAllowDeath'];
+const CONTROL_CALLS = ['proxy.addProxy', 'proxy.removeProxy', 'proxy.removeProxies', 'proxy.killPure', 'proxy.killSafePure', 'multisig.cancelAsMulti', 'balances.transferAll', 'balances.transferAllowDeath'];
+// Every coldkey swap call: announce, swap, schedule, dispute, reset, clear.
+const changesControl = (call) => CONTROL_CALLS.includes(callName(call)) || /^subtensorModule\.\w*(swapColdkey|coldkeySwap)/i.test(callName(call));
 
 const callWarnings = (call, { controller, vault, labels }) => {
   const nodes = [...callTree(call, controller)];
@@ -114,7 +116,7 @@ const callWarnings = (call, { controller, vault, labels }) => {
     ...nodes.filter(({ real }) => real !== undefined && real !== vault).map(({ real }) => `the call runs as ${real}, which is NOT the configured vault ${vault ?? '(none given)'}`),
     ...acting.filter(({ origin }) => origin === controller).map(({ call: c }) => `${callName(c)} is NOT wrapped in proxy.proxy: it runs as the multisig itself, not as the vault`),
     ...acting.filter(({ origin }) => !origin).map(({ call: c }) => `${callName(c)} runs as an account that this tool cannot name`),
-    ...nodes.filter(({ call: c }) => CONTROL_CALLS.includes(callName(c))).map(({ call: c }) => `${callName(c)} changes who controls the account or moves its whole balance`),
+    ...nodes.filter(({ call: c }) => changesControl(c)).map(({ call: c }) => `${callName(c)} changes who controls the account or moves its whole balance`),
     ...nodes.flatMap(({ call: c }) => callParts(c).args.flatMap((a) => a.addresses.filter((address) => !labels.has(address))
       .map((address) => `unknown address ${address} (${callName(c)} ${a.name}): check every character`))),
   ])];
