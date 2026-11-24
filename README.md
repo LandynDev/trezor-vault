@@ -16,7 +16,7 @@ Needs Node 24 or newer.
 
 ## Commands
 
-All commands take `--net test|main` (default `test`).
+All commands take `--net test|main` (default `test`). Day-to-day use: see the handbook, [HANDBOOK.md](HANDBOOK.md) or [handbook.html](handbook.html).
 
 | Command | Does |
 | --- | --- |
@@ -31,8 +31,20 @@ All commands take `--net test|main` (default `test`).
 | `node vault.mjs sign … --proxy-for <ss58> --add-delegate <ss58>` | Add an Any, delay 0 delegate to the pure proxy |
 | `node vault.mjs sign … --proxy-for <ss58> --remove-delegate <ss58>` | Remove one. Refuses to remove the last Any, delay 0 delegate. |
 | `node vault.mjs delegates <ss58>` | Delegates (type, delay) and free balance of an account |
+| `… --vault <name>` | Fill `--net --from --signer --signers --threshold --proxy-for` from `~/.trezor-vault/vaults.json` (or `TREZOR_VAULT_CONFIG`). A flag that differs from the config is an error. |
+| `node vault.mjs config-check --vault <name>` | Print the config and check it against the chain. Exit code is not 0 on any `FAIL`. |
+| `node vault.mjs approve --vault <name> [--hash <0x…>]` | Approve an open call. The call is read from the opener's extrinsic and shown in plain words. `--call <0xhex>` when the call data is not on chain. |
+| `node vault.mjs info --vault <name>` | Vault balance, delegates, stake, and open calls |
 
-`create-signer` and `sign` print a local URL. Open it in a browser with MetaMask, check the summary, then sign on the Trezor.
+Config file, one entry per vault:
+
+```json
+{ "1": { "net": "main", "trezor": "0x…", "signer": "5…", "signers": ["5…", "5…", "5…"], "threshold": 2, "vault": "5…" } }
+```
+
+`trezor` is `--from`, `signer` is `--signer`, `vault` is `--proxy-for`. `threshold` defaults to 2.
+
+`create-signer`, `sign` and `approve` print a local URL. Open it in a browser with MetaMask, check the summary, then sign on the Trezor.
 
 ## Checks
 
@@ -43,4 +55,7 @@ All commands take `--net test|main` (default `test`).
 | `sign` refuses a proxy with any delegate other than the mirror | Built in |
 | `sign --proxy-for` refuses unless the multisig is an Any, delay 0 delegate of the pure proxy. It warns on any extra delegate. | Every delegate can move the funds |
 | `sign` fails if the multisig call or any proxied call inside it returns an error | A failed inner call still reports `MultisigExecuted Ok` |
+| `approve` runs the same checks as `sign`. It takes the call only if its hash equals the pending hash. | The Trezor signs blind: the terminal summary is the only check |
+| `approve` prints `WARNING` when the call does not run as the configured vault, changes delegates, cancels a multisig call, moves a whole balance, or names an address with no label | These calls can move or lock the funds |
+| `sign` and `approve` refuse `proxy.removeProxies` as a pure proxy | It removes the last delegate |
 | The mined EVM tx must match the job: from, to, data, chain, value 0 | Built in |
