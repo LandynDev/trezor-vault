@@ -24,7 +24,9 @@ const USAGE = `usage: node vault.mjs <command> [--net test|main] [--vault <name>
                                                         --proxy-for: run the call as a pure proxy the multisig controls
                                                         --create-vault: spawn such a pure proxy from the multisig
   approve --vault <name> [--hash <0x…>] [--call <0xhex>]
-                                                        approve an open vault call; the call is read from the chain`;
+                                                        approve an open vault call; the call is read from the chain
+  info --vault <name>                                   vault balance, delegates, stake and open calls
+  config-check --vault <name>                           check the vault config against the chain`;
 
 const { positionals, values: opt } = parseArgs({
   allowPositionals: true,
@@ -283,6 +285,71 @@ const commands = {
     }
   },
 
+  info: async () => {
+    const vault = ss58Of(need('proxy-for'));
+    const signers = signersOpt();
+    const controller = multisigAddress(signers, thresholdOpt());
+    const labels = labelsOf({ vault, controller, signers, signer: opt.signer });
+    const api = await connect(opt.net);
+    try {
+      const proxies = await proxiesOf(api, vault);
+      const { data } = await api.query.system.account(vault);
+      console.log(`vault ${vault}: ${raoToTao(data.free)} TAO free, ${raoToTao(data.reserved)} TAO reserved, ${proxies.length} delegates`);
+      for (const p of proxies) console.log(`- ${labelled(p.delegate, labels)} (${p.type}, delay ${p.delay})`);
+      const stakes = await api.call.stakeInfoRuntimeApi?.getStakeInfoForColdkey?.(vault);
+      if (!stakes) console.log('stake: not available on this chain');
+      else {
+        const held = stakes.filter((s) => s.stake.toString() !== '0');
+        console.log(`stake: ${held.length} positions`);
+        for (const s of held) console.log(`- netuid ${s.netuid} hotkey ${encodeAddress(s.hotkey, SS58)}: ${raoToTao(s.stake.toString())} alpha`);
+      }
+      const open = await pendingCalls(api, controller);
+      console.log(`multisig ${controller}: ${open.length} pending`);
+      for (const p of open) console.log(await pendingLine(api, p, labels));
+    } finally {
+      await api.disconnect();
+    }
+  },
+
+  'config-check': async () => {
+    const from = need('from');
+    const signer = ss58Of(need('signer'));
+    const signers = signersOpt();
+    const threshold = thresholdOpt();
+    const vault = ss58Of(need('proxy-for'));
+    const mirror = mirrorOf(from);
+    const controller = multisigAddress(signers, threshold);
+    console.log([
+      `net        ${opt.net}`,
+      `trezor     ${from} (EVM address of the Trezor)`,
+      `mirror     ${mirror} (ss58 mirror of trezor; pays the fees)`,
+      `signer     ${signer} (pure proxy the Trezor controls)`,
+      `signers    ${signers.join(', ')}`,
+      `threshold  ${threshold} of ${signers.length}`,
+      `multisig   ${controller} (from signers and threshold)`,
+      `vault      ${vault} (pure proxy that holds the funds)`,
+    ].join('\n'));
+    const api = await connect(opt.net);
+    try {
+      const [ofSigner, ofVault] = [await proxiesOf(api, signer), await proxiesOf(api, vault)];
+      const anyOfVault = ofVault.filter((p) => p.isAny);
+      const found = (proxies) => `found: ${proxies.map(delegateLine).join(', ') || 'none'}`;
+      const checks = [
+        [signers.includes(signer), 'signer is one of signers', ''],
+        [ofSigner.length === 1 && ofSigner[0].isAny && ofSigner[0].delegate === mirror, 'the only delegate of signer is the mirror (Any, delay 0)', found(ofSigner)],
+        [anyOfVault.length === 1 && anyOfVault[0].delegate === controller, 'the only Any, delay 0 delegate of vault is the multisig', found(ofVault)],
+      ];
+      for (const [ok, what, detail] of checks) console.log(ok ? `OK    ${what}` : `FAIL  ${what} ${detail}`);
+      if (ofVault.length > anyOfVault.length) console.log(`WARNING    vault has other delegates. ${found(ofVault)}`);
+      for (const [label, account] of [['vault', vault], ['mirror', mirror], ['multisig', controller]]) {
+        const { data } = await api.query.system.account(account);
+        console.log(`${label.padEnd(10)} ${raoToTao(data.free)} TAO free, ${raoToTao(data.reserved)} TAO reserved`);
+      }
+      if (checks.some(([ok]) => !ok)) throw new Error('config-check FAILED');
+    } finally {
+      await api.disconnect();
+    }
+  },
 };
 
 const [cmd, ...rest] = positionals;
