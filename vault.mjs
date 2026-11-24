@@ -133,6 +133,11 @@ const errorText = (api, error) => {
   return `${section}.${name} (${docs.join(' ').trim()})`;
 };
 
+const UTILITY_FAILURES = ['BatchInterrupted', 'ItemFailed', 'BatchCompletedWithErrors'];
+
+const failureText = (api, { section, method, data }) =>
+  `${section}.${method} ${data.map((field) => (field.isErr ? errorText(api, field.asErr) : field.isModule === undefined ? field.toString() : errorText(api, field))).join(' ')}`.trim();
+
 // Returns true when this signature executed the call.
 const reportMultisig = async (api, blockNumber, { controller, signer, callHash }) => {
   const events = await (await api.at(await api.rpc.chain.getBlockHash(blockNumber))).query.system.events();
@@ -143,10 +148,10 @@ const reportMultisig = async (api, blockNumber, { controller, signer, callHash }
   for (const { event } of mine) console.log(`${event.method} ${JSON.stringify(event.data.toHuman())}`);
   const failed = mine.find(({ event }) => api.events.multisig.MultisigExecuted.is(event) && event.data.result.isErr);
   if (failed) throw new Error(`vault call executed but FAILED: ${errorText(api, failed.event.data.result.asErr)}`);
-  // A failed inner call still yields MultisigExecuted Ok; its ProxyExecuted carries the error.
-  const failedProxy = events.find(({ phase, event }) =>
-    phase.eq(mine[0].phase) && api.events.proxy.ProxyExecuted.is(event) && event.data.result.isErr);
-  if (failedProxy) throw new Error(`proxied call FAILED: ${errorText(api, failedProxy.event.data.result.asErr)}`);
+  // A failed inner call still yields MultisigExecuted Ok; an Err result or a utility failure event carries the error.
+  const failures = events.filter(({ phase, event }) =>
+    phase.eq(mine[0].phase) && (event.data.some((field) => field.isErr === true) || (event.section === 'utility' && UTILITY_FAILURES.includes(event.method))));
+  if (failures.length) throw new Error(`inner call FAILED: ${failures.map(({ event }) => failureText(api, event)).join('; ')}`);
   return mine.some(({ event }) => api.events.multisig.MultisigExecuted.is(event));
 };
 
