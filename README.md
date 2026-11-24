@@ -31,9 +31,9 @@ All commands take `--net test|main` (default `test`). Day-to-day use: see the ha
 | `node vault.mjs sign … --proxy-for <ss58> --add-delegate <ss58>` | Add an Any, delay 0 delegate to the pure proxy |
 | `node vault.mjs sign … --proxy-for <ss58> --remove-delegate <ss58>` | Remove one. Refuses to remove the last Any, delay 0 delegate. |
 | `node vault.mjs delegates <ss58>` | Delegates (type, delay) and free balance of an account |
-| `… --vault <name>` | Fill `--net --from --signer --signers --threshold --proxy-for` from `~/.trezor-vault/vaults.json` (or `TREZOR_VAULT_CONFIG`). A flag that differs from the config is an error. |
+| `… --vault <name>` | Fill `--net --from --signer --signers --threshold --proxy-for` from `~/.trezor-vault/vaults.json` (or `TREZOR_VAULT_CONFIG`). A flag that differs from the config is an error. `--vault` always fills `--proxy-for`, so use the explicit flags for `sign --create-vault`. |
 | `node vault.mjs config-check --vault <name>` | Print the config and check it against the chain. Exit code is not 0 on any `FAIL`. |
-| `node vault.mjs approve --vault <name> [--hash <0x…>]` | Approve an open call. The call is read from the opener's extrinsic and shown in plain words. `--call <0xhex>` when the call data is not on chain. |
+| `node vault.mjs approve --vault <name> [--hash <0x…>]` | Approve an open call. The call is read from the opener's extrinsic and shown in plain words. `--call <0xhex>` when the call data is not found on chain. |
 | `node vault.mjs info --vault <name>` | Vault balance, delegates, stake, and open calls |
 
 Config file, one entry per vault:

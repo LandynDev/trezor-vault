@@ -51,7 +51,7 @@ alias vault='node ~/trezor-vault/vault.mjs'
 vault config-check --vault N
 ```
 
-Every line must start with `OK`. Stop if a line starts with `FAIL`.
+The 3 check lines must start with `OK`. Stop if a check line starts with `FAIL`. One `FAIL` is expected: during a delegate rotation (section 3), between steps 3 and 5, the vault has 2 Any delegates.
 
 | Field | Meaning |
 | --- | --- |
@@ -139,9 +139,20 @@ vault info --vault N
 
 Amounts: `<tao>` is in TAO. `<alpha>` is in the alpha of the origin subnet.
 
-### Stake calls have a price limit
+### Price limits of stake calls
 
-btcli puts a price limit in every stake call when it opens the call. Approve soon after the call is opened. If the price moves past the limit, the call fails with `SlippageTooHigh`. The tool reports the failure and nothing moves. Open the call again.
+| Call | Price limit |
+| --- | --- |
+| Stake add | Yes (5% by default) |
+| Stake remove | Yes (5% by default) |
+| Stake move to another subnet | Yes (5% by default) |
+| Stake move in the same subnet | No. No swap occurs. |
+| Transfer stake in the same subnet | No. No swap occurs. |
+| Transfer stake to another subnet | No. The swap runs at any price. |
+
+btcli sets the limit when it opens the call. Approve soon after the call is opened. If the price moves past the limit, the call fails with `SlippageTooHigh`. The tool reports the failure and nothing moves. Open the call again.
+
+A stake transfer to another subnet has no price protection. To be safe, keep `--origin-netuid` and `--dest-netuid` equal.
 
 ### Cancel an open call
 
@@ -161,7 +172,7 @@ Always add the new delegate first. Remove the old delegate second.
 2. Approve: `vault approve --vault N`. A `WARNING` for `proxy.addProxy` is correct here.
 3. Check: `vault info --vault N` shows both delegates.
 4. Open: `btcli proxy remove --delegate <old delegate address> --proxy-type Any --delay 0 -w multisig-N --signatory <btcli wallet> --proxy-for vault-N --no-mev-shield -n finney`
-5. Approve and check again.
+5. Approve and check again. `vault config-check --vault N` shows `FAIL` between steps 3 and 5. It must show 3 `OK` lines after step 5.
 
 Every Any delegate can move all funds of the vault. The tool refuses to remove the last Any, delay 0 delegate, because the funds would be lost. If the new delegate is a new multisig, the old multisig must do step 4 before you update `vaults.json` and the btcli books.
 
@@ -171,7 +182,7 @@ Every Any delegate can move all funds of the vault. The tool refuses to remove t
 | --- | --- | --- |
 | `no pending calls` | No call is open, or it was already executed | Run `vault info --vault N` |
 | `more than one pending call` | Many calls are open | Run again with `--hash <0x call hash>` |
-| `the call data of … is not on chain` | The call was opened with the MEV shield or with a hash only | Cancel it. Open it again with `--no-mev-shield`. Or pass `--call <0xhex>` (btcli prints `multisig call data`). |
+| `the call data of … was not found on chain` | Possible causes: the MEV shield, an open with a hash only, or a call that a Trezor signer opened | Pass `--call <0xhex>` (btcli prints `multisig call data`). Or cancel the call and open it again with btcli and `--no-mev-shield`. |
 | `--call has hash …; the pending call is …` | The call hex is not the open call | Use the `multisig call data` that btcli printed |
 | `… already approved …` | The Trezor signer approved this call before | Another signer must approve |
 | `approved, NOT executed` | The threshold is not reached | Another signer must approve |
