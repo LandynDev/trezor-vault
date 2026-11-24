@@ -66,22 +66,22 @@ export const proxiesOf = async (api, account) => {
 export const pendingCalls = async (api, multisig) =>
   (await api.query.multisig.multisigs.entries(multisig)).map(([key, op]) => ({ callHash: key.args[1].toHex(), op: op.unwrap() }));
 
-export const pendingMultisig = async (api, vault, callHash) => {
-  const entry = await api.query.multisig.multisigs(vault, callHash);
+export const pendingMultisig = async (api, multisig, callHash) => {
+  const entry = await api.query.multisig.multisigs(multisig, callHash);
   return entry.isSome ? entry.unwrap() : null;
 };
 
 // Builds as_multi for `signer`: opens when nothing is pending, else approves (and executes at threshold).
 export const buildAsMulti = async (api, { signers, threshold, signer, call }) => {
-  const vault = multisigAddress(signers, threshold);
+  const multisig = multisigAddress(signers, threshold);
   const callHash = call.method.hash.toHex();
-  const pending = await pendingMultisig(api, vault, callHash);
+  const pending = await pendingMultisig(api, multisig, callHash);
   if (pending && pending.approvals.some((a) => a.eq(decodeAddress(signer))))
     throw new Error(`${signer} already approved ${callHash}`);
-  const { weight } = await call.paymentInfo(vault);
+  const { weight } = await call.paymentInfo(multisig);
   const timepoint = pending ? { height: pending.when.height, index: pending.when.index } : null;
   const asMulti = api.tx.multisig.asMulti(threshold, otherSignatories(signers, signer), timepoint, call.method, weight);
-  return { vault, callHash, pending, asMulti };
+  return { callHash, pending, asMulti };
 };
 
 export const proxyCallData = (real, call) =>

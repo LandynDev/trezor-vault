@@ -13,9 +13,9 @@ const USAGE = `usage: node vault.mjs <command> [--net test|main] [--vault <name>
   --vault <name>                                        fill --net --from --signer --signers --threshold --proxy-for
                                                         from ~/.trezor-vault/vaults.json
   mirror <h160>                                         ss58 mirror of an EVM address
-  address --signers a,b,c [--threshold 2]               multisig (vault) address
+  address --signers a,b,c [--threshold 2]               multisig address
   create-signer --from <h160> [--index 0]               spawn the Trezor's pure proxy (trezor-signer)
-  pending --signers a,b,c [--threshold 2]               list open vault calls
+  pending --signers a,b,c [--threshold 2]               list open multisig calls
   delegates <ss58>                                      proxies and free balance of an account
   sign --from <h160> --signer <trezor-signer> --signers a,b,c [--threshold 2] [--proxy-for <ss58>]
        (--transfer-to <ss58> --amount <tao> | --create-vault [--index 0] |
@@ -212,9 +212,9 @@ const commands = {
   pending: async () => {
     const api = await connect(opt.net);
     try {
-      const vault = multisigAddress(signersOpt(), thresholdOpt());
-      const open = await pendingCalls(api, vault);
-      console.log(`vault ${vault}: ${open.length} pending`);
+      const multisig = multisigAddress(signersOpt(), thresholdOpt());
+      const open = await pendingCalls(api, multisig);
+      console.log(`multisig ${multisig}: ${open.length} pending`);
       for (const { callHash, op } of open)
         console.log(`- hash ${callHash} opened at ${op.when.height}-${op.when.index} by ${encodeAddress(op.depositor, SS58)}, ${op.approvals.length} approvals`);
     } finally {
