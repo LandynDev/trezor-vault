@@ -54,8 +54,10 @@ Config file, one entry per vault:
 | After `create-signer`, the proxy's delegate list (polkadot.js apps or an explorer) shows only the mirror | A second delegate could sign in the Trezor's place |
 | `sign` refuses a proxy with any delegate other than the mirror | Built in |
 | `sign --proxy-for` refuses unless the multisig is an Any, delay 0 delegate of the pure proxy. It warns on any extra delegate. | Every delegate can move the funds |
-| `sign` fails if the multisig call or any proxied call inside it returns an error | A failed inner call still reports `MultisigExecuted Ok` |
+| `sign` and `approve` fail if the multisig call, a proxied call, or a batch item inside it returns an error | A failed inner call still reports `MultisigExecuted Ok` |
 | `approve` runs the same checks as `sign`. It takes the call only if its hash equals the pending hash. | The Trezor signs blind: the terminal summary is the only check |
 | `approve` prints `WARNING` when the call does not run as the configured vault, changes delegates, cancels a multisig call, moves a whole balance, or names an address with no label | These calls can move or lock the funds |
-| `sign` and `approve` refuse `proxy.removeProxies` as a pure proxy | It removes the last delegate |
+| `sign` and `approve` check every `proxy.proxy` at every depth of the call: the account that runs it must be an Any, delay 0 delegate of its `real` | A proxied call can hide inside a batch |
+| `sign` and `approve` refuse `proxy.removeProxies` as a proxied account, and any set of `removeProxy` calls that leaves it no Any, delay 0 delegate | The funds of a pure proxy with no delegate are lost |
+| `approve` prints every argument in full and labels every account id inside lists and structures | A cut argument could hide an address |
 | The mined EVM tx must match the job: from, to, data, chain, value 0 | Built in |

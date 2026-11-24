@@ -175,8 +175,10 @@ Every Any delegate can move all funds of the vault. The tool refuses to remove t
 | `--call has hash …; the pending call is …` | The call hex is not the open call | Use the `multisig call data` that btcli printed |
 | `… already approved …` | The Trezor signer approved this call before | Another signer must approve |
 | `approved, NOT executed` | The threshold is not reached | Another signer must approve |
-| `proxied call FAILED: …SlippageTooHigh` | The price moved past the limit of a stake call | Nothing moved. Open the call again and approve sooner. |
-| `proxied call FAILED: …` | The call ran and failed (for example, not enough balance) | Nothing moved. Read the error name, fix the cause, open the call again. |
+| `inner call FAILED: …SlippageTooHigh` | The price moved past the limit of a stake call | Nothing moved. Open the call again and approve sooner. |
+| `inner call FAILED: proxy.ProxyExecuted …` | The call ran and failed (for example, not enough balance) | Nothing moved. Read the error name, fix the cause, open the call again. |
+| `inner call FAILED: utility.BatchInterrupted …` or `utility.ItemFailed …` | One item of a batch failed | Other items of the batch DID run. Run `vault info --vault N` and check what moved. |
+| `refusing: cannot tell which account runs …` | A proxy call is inside a wrapper that changes the account | Cancel the call. Open it as `proxy.proxy` directly, or inside a batch. |
 | `… is not an Any, delay 0 delegate of …` | The multisig does not control that account | Check `signers`, `threshold` and `vault` in `vaults.json` |
 | `… must have exactly one proxy` | The Trezor signer has a wrong delegate set | Stop. Do not sign. Check the Trezor signer on an explorer. |
 | `refusing: … is the last Any, delay 0 delegate` | The call would lock the vault forever | Cancel the call |
