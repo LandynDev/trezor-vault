@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { encodeAddress } from '@polkadot/util-crypto';
 import {
-  PROXY_PRECOMPILE, PROXY_TYPE_ANY, SS58, buildAsMulti, callParts, callTree, connect, createPureProxyData, describeCall,
+  PROXY_PRECOMPILE, PROXY_TYPE_ANY, SS58, buildAsMulti, callName, callParts, callTree, connect, createPureProxyData, describeCall,
   findOpenedCall, findPureCreated, mirrorOf, multisigAddress, pendingCalls, proxiesOf, proxyCallData,
   raoToTao, ss58Of, taoToRao,
 } from './chain.mjs';
@@ -63,21 +63,33 @@ const assertAnyDelegate = async (api, real, delegate) => {
   if (!ok) throw new Error(`${real} must have exactly one proxy: ${delegate} (Any, delay 0). Found: ${proxies.map(delegateLine).join(', ') || 'none'}`);
 };
 
-// Checks every account the call depends on. Returns the delegates of `real`.
-const checkAccounts = async (api, { from, signer, controller, real, inner }) => {
+// Checks every account the call depends on, at every depth. Returns each proxied account with its delegates.
+const checkAccounts = async (api, { from, signer, controller, call }) => {
   await assertAnyDelegate(api, signer, mirrorOf(from));
-  const delegates = real ? await proxiesOf(api, real) : [];
-  const holdsAny = (who) => delegates.some((p) => p.isAny && p.delegate === who);
-  if (real && !holdsAny(controller)) throw new Error(`${controller} is not an Any, delay 0 delegate of ${real}`);
-  for (const { call } of real ? callTree(inner) : []) {
-    if (api.tx.proxy.removeProxies.is(call)) throw new Error(`refusing: proxy.removeProxies removes every delegate of ${real}`);
-    if (!api.tx.proxy.removeProxy.is(call) || call.args[1].index !== PROXY_TYPE_ANY || !call.args[2].isZero()) continue;
-    const [leaving] = callParts(call).args[0].addresses;
-    if (!holdsAny(leaving)) throw new Error(`${leaving} is not an Any, delay 0 delegate of ${real}`);
-    // A pure proxy has no key: with no Any delegate left, its funds are lost forever.
-    if (!delegates.some((p) => p.isAny && p.delegate !== leaving)) throw new Error(`refusing: ${leaving} is the last Any, delay 0 delegate of ${real}`);
+  const holdsAny = (delegates, who) => delegates.some((p) => p.isAny && p.delegate === who);
+  const reals = new Map();
+  const leaving = new Map();
+  for (const { call: c, origin, real } of callTree(call, controller)) {
+    const removesAll = api.tx.proxy.removeProxies.is(c);
+    const removesAny = api.tx.proxy.removeProxy.is(c) && c.args[1].index === PROXY_TYPE_ANY && c.args[2].isZero();
+    const changesReal = real !== undefined || ((removesAll || removesAny) && origin !== controller);
+    if (changesReal && !origin) throw new Error(`refusing: cannot tell which account runs ${callName(c)}`);
+    if (real === null) throw new Error('proxy.proxy real must be a plain account id');
+    if (real) {
+      if (!reals.has(real)) reals.set(real, await proxiesOf(api, real));
+      if (!holdsAny(reals.get(real), origin)) throw new Error(`${origin} is not an Any, delay 0 delegate of ${real}`);
+    }
+    if (!changesReal || real) continue;
+    if (removesAll) throw new Error(`refusing: proxy.removeProxies removes every delegate of ${origin}`);
+    leaving.set(origin, [...(leaving.get(origin) ?? []), callParts(c).args[0].addresses[0]]);
   }
-  return delegates;
+  for (const [real, gone] of leaving)
+    for (const who of gone) {
+      if (!holdsAny(reals.get(real), who)) throw new Error(`${who} is not an Any, delay 0 delegate of ${real}`);
+      // A pure proxy has no key: with no Any delegate left, its funds are lost forever.
+      if (!reals.get(real).some((p) => p.isAny && !gone.includes(p.delegate))) throw new Error(`refusing: ${who} is the last Any, delay 0 delegate of ${real}`);
+    }
+  return [...reals].map(([real, delegates]) => ({ real, delegates }));
 };
 
 const labelsOf = ({ vault, controller, signers, signer }) =>
@@ -88,8 +100,6 @@ const labelsOf = ({ vault, controller, signers, signer }) =>
   ]);
 
 const labelled = (address, labels) => (labels.has(address) ? `${address} (${labels.get(address)})` : address);
-const callName = (call) => `${call.section}.${call.method}`;
-
 // One line per call level: pallet.method(arg=value, …).
 const callLines = (call, labels) =>
   [...callTree(call)].map(({ call: c, depth }) =>
@@ -97,15 +107,17 @@ const callLines = (call, labels) =>
 
 const CONTROL_CALLS = ['proxy.addProxy', 'proxy.removeProxy', 'proxy.removeProxies', 'proxy.killPure', 'multisig.cancelAsMulti', 'balances.transferAll', 'balances.transferAllowDeath'];
 
-const callWarnings = (call, { real, vault, labels }) => {
-  const calls = [...callTree(call)].map((node) => node.call);
-  return [
-    !real && 'the call is NOT wrapped in proxy.proxy: it runs as the multisig itself, not as the vault',
-    real && real !== vault && `the call runs as ${real}, which is NOT the configured vault ${vault ?? '(none given)'}`,
-    ...calls.filter((c) => CONTROL_CALLS.includes(callName(c))).map((c) => `${callName(c)} changes who controls the account or moves its whole balance`),
-    ...calls.flatMap((c) => callParts(c).args.flatMap((a) => a.addresses.filter((address) => !labels.has(address))
+const callWarnings = (call, { controller, vault, labels }) => {
+  const nodes = [...callTree(call, controller)];
+  const acting = nodes.filter(({ call: c }) => !callParts(c).calls.length);
+  return [...new Set([
+    ...nodes.filter(({ real }) => real !== undefined && real !== vault).map(({ real }) => `the call runs as ${real}, which is NOT the configured vault ${vault ?? '(none given)'}`),
+    ...acting.filter(({ origin }) => origin === controller).map(({ call: c }) => `${callName(c)} is NOT wrapped in proxy.proxy: it runs as the multisig itself, not as the vault`),
+    ...acting.filter(({ origin }) => !origin).map(({ call: c }) => `${callName(c)} runs as an account that this tool cannot name`),
+    ...nodes.filter(({ call: c }) => CONTROL_CALLS.includes(callName(c))).map(({ call: c }) => `${callName(c)} changes who controls the account or moves its whole balance`),
+    ...nodes.flatMap(({ call: c }) => callParts(c).args.flatMap((a) => a.addresses.filter((address) => !labels.has(address))
       .map((address) => `unknown address ${address} (${callName(c)} ${a.name}): check every character`))),
-  ].filter(Boolean);
+  ])];
 };
 
 const pendingLine = async (api, { callHash, op }, labels) => {
@@ -139,7 +151,7 @@ const reportMultisig = async (api, blockNumber, { controller, signer, callHash }
 };
 
 // Shows the summary, sends as_multi through the Trezor, then checks the result.
-const signAsMulti = async (api, { from, signer, signers, threshold, real, delegates, call, callSummary, mayOpen }) => {
+const signAsMulti = async (api, { from, signer, signers, threshold, reals, call, callSummary, mayOpen }) => {
   const controller = multisigAddress(signers, threshold);
   const { callHash, pending, asMulti } = await buildAsMulti(api, { signers, threshold, signer, call });
   if (!pending && !mayOpen) throw new Error(`call ${callHash} is no longer pending`);
@@ -148,9 +160,11 @@ const signAsMulti = async (api, { from, signer, signers, threshold, real, delega
   if (!pending) console.warn('warning: no open call found; the Trezor signer will open it and pay the deposit');
   const summary = [
     `controller ${controller} (${threshold}-of-${signers.length} multisig)`,
-    real && `real       ${real} (the call runs as this account)`,
-    real && `delegates  ${delegates.map(delegateLine).join(', ')}`,
-    delegates.length > 1 && `WARNING    ${real} has ${delegates.length} delegates; EACH ONE can move its funds`,
+    ...reals.flatMap(({ real, delegates }) => [
+      `real       ${real} (the call runs as this account)`,
+      `delegates  ${delegates.map(delegateLine).join(', ')}`,
+      delegates.length > 1 && `WARNING    ${real} has ${delegates.length} delegates; EACH ONE can move its funds`,
+    ]),
     `signers    ${signers.join(', ')}`,
     `signing as ${signer} (trezor-signer)`,
     `action     ${action} (${approvals}/${threshold} approvals before this)`,
@@ -229,10 +243,10 @@ const commands = {
     const api = await connect(opt.net);
     try {
       const inner = innerCalls[kind](api);
-      const delegates = await checkAccounts(api, { from, signer, controller, real, inner: inner.method });
       const call = real ? api.tx.proxy.proxy(real, null, inner) : inner;
+      const reals = await checkAccounts(api, { from, signer, controller, call: call.method });
       const callSummary = [`call       ${describeCall(inner)}`, kind === 'transfer-to' && `amount     ${raoToTao(taoToRao(opt.amount))} TAO`];
-      const { executed, receipt } = await signAsMulti(api, { from, signer, signers, threshold, real, delegates, call, callSummary, mayOpen: true });
+      const { executed, receipt } = await signAsMulti(api, { from, signer, signers, threshold, reals, call, callSummary, mayOpen: true });
       if (kind !== 'create-vault') return;
       if (!executed) return console.log('\nvault not created yet: RECORD THIS prints for the executing signer');
       const { pure: vault, ...created } = await findPureCreated(api, receipt.blockNumber, controller, Number(opt.index));
@@ -269,17 +283,14 @@ const commands = {
       if (found.hash.toHex() !== callHash) throw new Error(`--call has hash ${found.hash.toHex()}; the pending call is ${callHash}`);
       // Decode again with the current runtime: that is what executes.
       const call = api.tx(api.createType('Call', found.toHex()));
-      const [{ real }] = callTree(call.method);
-      if (real === null) throw new Error('proxy.proxy real must be a plain account id');
-      const inner = real ? call.method.args[2] : call.method;
-      const delegates = await checkAccounts(api, { from, signer, controller, real, inner });
+      const reals = await checkAccounts(api, { from, signer, controller, call: call.method });
       const [first, ...rest] = callLines(call.method, labels);
       const callSummary = [
         `call       ${first}`,
         ...rest.map((line) => `           ${line}`),
-        ...callWarnings(call.method, { real, vault, labels }).map((warning) => `WARNING    ${warning}`),
+        ...callWarnings(call.method, { controller, vault, labels }).map((warning) => `WARNING    ${warning}`),
       ];
-      const { executed, approvals } = await signAsMulti(api, { from, signer, signers, threshold, real, delegates, call, callSummary });
+      const { executed, approvals } = await signAsMulti(api, { from, signer, signers, threshold, reals, call, callSummary });
       if (!executed) console.log(`\napproved, NOT executed: ${approvals}/${threshold} approvals. Another signer must approve.`);
     } finally {
       await api.disconnect();
