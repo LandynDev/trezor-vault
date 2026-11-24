@@ -127,15 +127,16 @@ const render = (value, found, label) => {
     found.addresses.push(address);
     return label(address);
   }
+  // Enum first: a variant with no payload also reports isNone.
+  if (typeof value.type === 'string' && typeof value.index === 'number' && value.value?.toRawType) {
+    if (value.type === 'Id' && isAccount(value.value)) return render(value.value, found, label);
+    return value.isBasic || value.value.toRawType() === 'Null' ? value.type : `${value.type}(${render(value.value, found, label)})`;
+  }
   if (value.isNone === true) return 'null';
   // Option, Compact and decoded wrappers hold one value.
   if (typeof value.unwrap === 'function' && value.isDecoded !== false) return render(value.unwrap(), found, label);
   if (value instanceof Map) return `{${[...value].map(([key, item]) => `${typeof key === 'string' ? key : render(key, found, label)}: ${render(item, found, label)}`).join(', ')}}`;
   if (value instanceof Set || Array.isArray(value)) return `[${all([...value])}]`;
-  if (typeof value.type === 'string' && typeof value.index === 'number' && value.value?.toRawType) {
-    if (value.type === 'Id' && isAccount(value.value)) return render(value.value, found, label);
-    return value.isBasic || value.value.toRawType() === 'Null' ? value.type : `${value.type}(${render(value.value, found, label)})`;
-  }
   return plain(value);
 };
 
