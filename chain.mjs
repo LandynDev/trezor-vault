@@ -144,13 +144,17 @@ const render = (value, found, label) => {
 // Balances show as 9-decimal units and raw.
 export const callParts = (call, label = (address) => address) => {
   const calls = [];
+  // Root (netuid 0) stake is TAO. The limit price of a swap or move is an alpha ratio: shown raw.
+  const fromRoot = call.args.some((arg, i) => /^(origin)?netuid$/i.test(call.meta.args[i].name) && arg.toString() === '0');
+  const hasRatioLimit = /^(swap|move)Stake/.test(call.method);
   const args = call.args.flatMap((arg, i) => {
     const { name, type, typeName } = call.meta.args[i];
     const hint = `${typeName} ${name}`;
     const found = { calls, addresses: [] };
-    const isBalance = /^(Compact<)?u(64|128)>?$/.test(type.toString()) && /balance|currency|amount|value|price/i.test(hint);
+    const isRatio = hasRatioLimit && name.eq('limitPrice');
+    const isBalance = !isRatio && /^(Compact<)?u(64|128)>?$/.test(type.toString()) && /balance|currency|amount|value|price/i.test(hint);
     const text = isBalance
-      ? `${raoToTao(arg.toString())} ${/alpha|unstaked/i.test(hint) ? 'alpha' : 'TAO'} (${arg.toString()} rao)`
+      ? `${raoToTao(arg.toString())} ${/alpha|unstaked/i.test(hint) && !fromRoot ? 'alpha' : 'TAO'} (${arg.toString()} rao)`
       : render(arg, found, label);
     const onlyCalls = isCall(arg) || (Array.isArray(arg) && arg.length > 0 && arg.every(isCall));
     return onlyCalls ? [] : [{ name: name.toString(), text, addresses: found.addresses }];
