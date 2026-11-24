@@ -5,9 +5,12 @@ import {
   PROXY_PRECOMPILE, PROXY_TYPE_ANY, SS58, buildAsMulti, callArgs, callTree, connect, createPureProxyData, describeCall,
   findPureCreated, mirrorOf, multisigAddress, pendingCalls, proxiesOf, proxyCallData, raoToTao, ss58Of, taoToRao,
 } from './chain.mjs';
+import { loadVault, vaultFlags } from './config.mjs';
 import { send } from './send.mjs';
 
-const USAGE = `usage: node vault.mjs <command> [--net test|main]
+const USAGE = `usage: node vault.mjs <command> [--net test|main] [--vault <name>]
+  --vault <name>                                        fill --net --from --signer --signers --threshold --proxy-for
+                                                        from ~/.trezor-vault/vaults.json
   mirror <h160>                                         ss58 mirror of an EVM address
   address --signers a,b,c [--threshold 2]               multisig (vault) address
   create-signer --from <h160> [--index 0]               spawn the Trezor's pure proxy (trezor-signer)
@@ -23,8 +26,8 @@ const USAGE = `usage: node vault.mjs <command> [--net test|main]
 const { positionals, values: opt } = parseArgs({
   allowPositionals: true,
   options: {
-    net: { type: 'string', default: 'test' }, from: { type: 'string' },
-    index: { type: 'string', default: '0' }, signers: { type: 'string' }, threshold: { type: 'string', default: '2' },
+    net: { type: 'string' }, from: { type: 'string' }, vault: { type: 'string' },
+    index: { type: 'string' }, signers: { type: 'string' }, threshold: { type: 'string' },
     signer: { type: 'string' }, 'transfer-to': { type: 'string' }, amount: { type: 'string' }, call: { type: 'string' },
     'proxy-for': { type: 'string' }, 'create-vault': { type: 'boolean' },
     'add-delegate': { type: 'string' }, 'remove-delegate': { type: 'string' },
@@ -208,6 +211,14 @@ if (!commands[cmd]) {
   console.log(USAGE);
   process.exit(cmd ? 1 : 0);
 }
+if (opt.vault)
+  for (const [flag, value] of Object.entries(vaultFlags(loadVault(opt.vault)))) {
+    if (opt[flag] !== undefined && opt[flag] !== value) throw new Error(`--${flag} ${opt[flag]} conflicts with vault "${opt.vault}" (${flag} ${value})`);
+    opt[flag] = value;
+  }
+opt.net ??= 'test';
+opt.threshold ??= '2';
+opt.index ??= '0';
 if (opt.net !== 'test' && opt.net !== 'main') throw new Error('--net must be test or main');
 await commands[cmd](rest);
 process.exit(0);
