@@ -3,7 +3,8 @@ import { parseArgs } from 'node:util';
 import { encodeAddress } from '@polkadot/util-crypto';
 import {
   PROXY_PRECOMPILE, PROXY_TYPE_ANY, SS58, buildAsMulti, callArgs, callTree, connect, createPureProxyData, describeCall,
-  findPureCreated, mirrorOf, multisigAddress, pendingCalls, proxiesOf, proxyCallData, raoToTao, ss58Of, taoToRao,
+  findOpenedCall, findPureCreated, mirrorOf, multisigAddress, pendingCalls, proxiedReal, proxiesOf, proxyCallData,
+  raoToTao, ss58Of, taoToRao,
 } from './chain.mjs';
 import { loadVault, vaultFlags } from './config.mjs';
 import { send } from './send.mjs';
@@ -21,12 +22,14 @@ const USAGE = `usage: node vault.mjs <command> [--net test|main] [--vault <name>
         --add-delegate <ss58> | --remove-delegate <ss58> | --call <0xhex>)
                                                         open/approve a vault call through the Trezor
                                                         --proxy-for: run the call as a pure proxy the multisig controls
-                                                        --create-vault: spawn such a pure proxy from the multisig`;
+                                                        --create-vault: spawn such a pure proxy from the multisig
+  approve --vault <name> [--hash <0x…>] [--call <0xhex>]
+                                                        approve an open vault call; the call is read from the chain`;
 
 const { positionals, values: opt } = parseArgs({
   allowPositionals: true,
   options: {
-    net: { type: 'string' }, from: { type: 'string' }, vault: { type: 'string' },
+    net: { type: 'string' }, from: { type: 'string' }, vault: { type: 'string' }, hash: { type: 'string' },
     index: { type: 'string' }, signers: { type: 'string' }, threshold: { type: 'string' },
     signer: { type: 'string' }, 'transfer-to': { type: 'string' }, amount: { type: 'string' }, call: { type: 'string' },
     'proxy-for': { type: 'string' }, 'create-vault': { type: 'boolean' },
@@ -75,6 +78,40 @@ const checkAccounts = async (api, { from, signer, controller, real, inner }) => 
   return delegates;
 };
 
+const labelsOf = ({ vault, controller, signers, signer }) =>
+  new Map([
+    ...signers.map((s, i) => [s, s === signer ? 'your Trezor signer' : `signer ${i + 1}`]),
+    [controller, 'multisig'],
+    ...(vault ? [[vault, 'vault']] : []),
+  ]);
+
+const labelled = (address, labels) => (labels.has(address) ? `${address} (${labels.get(address)})` : address);
+const callName = (call) => `${call.section}.${call.method}`;
+
+// One line per call level: pallet.method(arg=value, …).
+const callLines = (call, labels) =>
+  [...callTree(call)].map(({ call: c, depth }) =>
+    `${'  '.repeat(depth)}${callName(c)}(${callArgs(c).map((a) => `${a.name}=${a.address ? labelled(a.address, labels) : a.text}`).join(', ')})`);
+
+const CONTROL_CALLS = ['proxy.addProxy', 'proxy.removeProxy', 'proxy.removeProxies', 'proxy.killPure', 'multisig.cancelAsMulti', 'balances.transferAll', 'balances.transferAllowDeath'];
+
+const callWarnings = (call, { real, vault, labels }) => {
+  const calls = [...callTree(call)].map((node) => node.call);
+  return [
+    !real && 'the call is NOT wrapped in proxy.proxy: it runs as the multisig itself, not as the vault',
+    real && real !== vault && `the call runs as ${real}, which is NOT the configured vault ${vault ?? '(none given)'}`,
+    ...calls.filter((c) => CONTROL_CALLS.includes(callName(c))).map((c) => `${callName(c)} changes who controls the account or moves its whole balance`),
+    ...calls.flatMap((c) => callArgs(c).filter((a) => a.address && !labels.has(a.address))
+      .map((a) => `unknown address ${a.address} (${callName(c)} ${a.name}): check every character`)),
+  ].filter(Boolean);
+};
+
+const pendingLine = async (api, { callHash, op }, labels) => {
+  const call = await findOpenedCall(api, op.when, callHash);
+  const head = `- hash ${callHash} opened at ${op.when.height}-${op.when.index} by ${labelled(encodeAddress(op.depositor, SS58), labels)}, ${op.approvals.length} approvals`;
+  return `${head}\n  ${call ? callLines(call, labels).map((line) => line.trim()).join(' > ') : 'call data is not on chain'}`;
+};
+
 // Names a module error (pallet.Error) when the runtime knows it.
 const errorText = (api, error) => {
   if (!error.isModule) return error.toString();
@@ -100,9 +137,10 @@ const reportMultisig = async (api, blockNumber, { controller, signer, callHash }
 };
 
 // Shows the summary, sends as_multi through the Trezor, then checks the result.
-const signAsMulti = async (api, { from, signer, signers, threshold, real, delegates, call, callSummary }) => {
+const signAsMulti = async (api, { from, signer, signers, threshold, real, delegates, call, callSummary, mayOpen }) => {
   const controller = multisigAddress(signers, threshold);
   const { callHash, pending, asMulti } = await buildAsMulti(api, { signers, threshold, signer, call });
+  if (!pending && !mayOpen) throw new Error(`call ${callHash} is no longer pending`);
   const approvals = pending ? pending.approvals.length : 0;
   const action = approvals + 1 >= threshold ? 'EXECUTE' : pending ? 'APPROVE' : 'OPEN';
   if (!pending) console.warn('warning: no open call found; the Trezor signer will open it and pay the deposit');
@@ -121,7 +159,7 @@ const signAsMulti = async (api, { from, signer, signers, threshold, real, delega
   console.log(summary);
   const receipt = await send({ net: opt.net, from, to: PROXY_PRECOMPILE, data: proxyCallData(signer, asMulti), summary });
   const executed = await reportMultisig(api, receipt.blockNumber, { controller, signer, callHash });
-  return { executed, receipt };
+  return { executed, receipt, approvals: approvals + 1 };
 };
 
 const commands = {
@@ -192,13 +230,54 @@ const commands = {
       const delegates = await checkAccounts(api, { from, signer, controller, real, inner: inner.method });
       const call = real ? api.tx.proxy.proxy(real, null, inner) : inner;
       const callSummary = [`call       ${describeCall(inner)}`, kind === 'transfer-to' && `amount     ${raoToTao(taoToRao(opt.amount))} TAO`];
-      const { executed, receipt } = await signAsMulti(api, { from, signer, signers, threshold, real, delegates, call, callSummary });
+      const { executed, receipt } = await signAsMulti(api, { from, signer, signers, threshold, real, delegates, call, callSummary, mayOpen: true });
       if (kind !== 'create-vault') return;
       if (!executed) return console.log('\nvault not created yet: RECORD THIS prints for the executing signer');
       const { pure: vault, ...created } = await findPureCreated(api, receipt.blockNumber, controller, Number(opt.index));
       await assertAnyDelegate(api, vault, controller);
       console.log('\nRECORD THIS (needed to kill it later):');
       console.log(JSON.stringify({ vault, controller, ...created }, null, 2));
+    } finally {
+      await api.disconnect();
+    }
+  },
+
+  approve: async () => {
+    const from = need('from');
+    const signer = ss58Of(need('signer'));
+    const signers = signersOpt();
+    const threshold = thresholdOpt();
+    if (!signers.includes(signer)) throw new Error(`--signer ${signer} is not in --signers`);
+    const vault = opt['proxy-for'] && ss58Of(opt['proxy-for']);
+    const controller = multisigAddress(signers, threshold);
+    const labels = labelsOf({ vault, controller, signers, signer });
+    const api = await connect(opt.net);
+    try {
+      const open = await pendingCalls(api, controller);
+      if (!open.length) return console.log(`multisig ${controller}: no pending calls`);
+      const wanted = opt.hash ? open.filter((p) => p.callHash === opt.hash.toLowerCase()) : open;
+      if (wanted.length !== 1) {
+        console.log(`multisig ${controller}: ${open.length} pending`);
+        for (const p of open) console.log(await pendingLine(api, p, labels));
+        throw new Error(wanted.length ? 'more than one pending call: run again with --hash <0x…>' : `no pending call with hash ${opt.hash}`);
+      }
+      const [{ callHash, op }] = wanted;
+      const found = opt.call ? api.createType('Call', opt.call) : await findOpenedCall(api, op.when, callHash);
+      if (!found) throw new Error(`the call data of ${callHash} is not on chain (block ${op.when.height}, extrinsic ${op.when.index}).\nThe opener used the MEV shield or approve_as_multi. Open the call again with --no-mev-shield on btcli, or pass --call <0xhex>.`);
+      if (found.hash.toHex() !== callHash) throw new Error(`--call has hash ${found.hash.toHex()}; the pending call is ${callHash}`);
+      // Decode again with the current runtime: that is what executes.
+      const call = api.tx(api.createType('Call', found.toHex()));
+      const real = proxiedReal(api, call.method);
+      const inner = real ? call.method.args[2] : call.method;
+      const delegates = await checkAccounts(api, { from, signer, controller, real, inner });
+      const [first, ...rest] = callLines(call.method, labels);
+      const callSummary = [
+        `call       ${first}`,
+        ...rest.map((line) => `           ${line}`),
+        ...callWarnings(call.method, { real, vault, labels }).map((warning) => `WARNING    ${warning}`),
+      ];
+      const { executed, approvals } = await signAsMulti(api, { from, signer, signers, threshold, real, delegates, call, callSummary });
+      if (!executed) console.log(`\napproved, NOT executed: ${approvals}/${threshold} approvals. Another signer must approve.`);
     } finally {
       await api.disconnect();
     }
