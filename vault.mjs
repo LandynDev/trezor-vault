@@ -135,14 +135,16 @@ const errorText = (api, error) => {
 
 const UTILITY_FAILURES = ['BatchInterrupted', 'ItemFailed', 'BatchCompletedWithErrors'];
 
+const isDispatchError = (field) => typeof field.isModule === 'boolean';
+
 const failureText = (api, { section, method, data }) =>
-  `${section}.${method} ${data.map((field) => (field.isErr ? errorText(api, field.asErr) : field.isModule === undefined ? field.toString() : errorText(api, field))).join(' ')}`.trim();
+  `${section}.${method} ${data.map((field) => (field.isErr ? errorText(api, field.asErr) : isDispatchError(field) ? errorText(api, field) : field.toString())).join(' ')}`.trim();
 
 // Returns true when this signature executed the call.
 const reportMultisig = async (api, blockNumber, { controller, signer, callHash }) => {
   const events = await (await api.at(await api.rpc.chain.getBlockHash(blockNumber))).query.system.events();
   const mine = events.filter(({ event }) =>
-    event.section === 'multisig' && encodeAddress(event.data.multisig, SS58) === controller &&
+    event.section === 'multisig' && event.data.multisig && encodeAddress(event.data.multisig, SS58) === controller &&
     event.data.approving?.eq(signer) && event.data.callHash.toHex() === callHash);
   if (!mine.length) throw new Error(`no multisig event for ${controller} by ${signer} in block ${blockNumber}`);
   for (const { event } of mine) console.log(`${event.method} ${JSON.stringify(event.data.toHuman())}`);
