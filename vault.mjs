@@ -9,9 +9,14 @@ import {
 import { loadVault, vaultFlags } from './config.mjs';
 import { send } from './send.mjs';
 
-const USAGE = `usage: node vault.mjs <command> [--net test|main] [--vault <name>]
-  --vault <name>                                        fill --net --from --signer --signers --threshold --proxy-for
-                                                        from ~/.trezor-vault/vaults.json
+const USAGE = `usage: vault <command> [--net main|test] (default main)
+
+Daily use, N = vault name in ~/.trezor-vault/vaults.json:
+  approve N [--hash <0x…>] [--call <0xhex>]             approve the open call of vault N; shows it in plain words first
+  info N                                                vault N balance, delegates, stake and open calls
+  check N                                               check the vault N config against the chain
+
+Setup and low-level:
   mirror <h160>                                         ss58 mirror of an EVM address
   address --signers a,b,c [--threshold 2]               multisig address
   create-signer --from <h160> [--index 0]               spawn the Trezor's pure proxy (trezor-signer)
@@ -21,12 +26,7 @@ const USAGE = `usage: node vault.mjs <command> [--net test|main] [--vault <name>
        (--transfer-to <ss58> --amount <tao> | --create-vault [--index 0] |
         --add-delegate <ss58> | --remove-delegate <ss58> | --call <0xhex>)
                                                         open/approve a vault call through the Trezor
-                                                        --proxy-for: run the call as a pure proxy the multisig controls
-                                                        --create-vault: spawn such a pure proxy from the multisig
-  approve --vault <name> [--hash <0x…>] [--call <0xhex>]
-                                                        approve an open vault call; the call is read from the chain
-  info --vault <name>                                   vault balance, delegates, stake and open calls
-  config-check --vault <name>                           check the vault config against the chain`;
+  --vault N                                             fill --net --from --signer --signers --threshold --proxy-for from the config`;
 
 const { positionals, values: opt } = parseArgs({
   allowPositionals: true,
@@ -70,6 +70,8 @@ const checkAccounts = async (api, { from, signer, controller, call }) => {
   const reals = new Map();
   const leaving = new Map();
   for (const { call: c, origin, real } of callTree(call, controller)) {
+    // A pure proxy has no key: killing it loses its funds forever.
+    if (['proxy.killPure', 'proxy.killSafePure'].includes(callName(c))) throw new Error(`refusing: ${callName(c)} destroys the account that runs it`);
     const removesAll = api.tx.proxy.removeProxies.is(c);
     const removesAny = api.tx.proxy.removeProxy.is(c) && c.args[1].index === PROXY_TYPE_ANY && c.args[2].isZero();
     const changesReal = real !== undefined || ((removesAll || removesAny) && origin !== controller);
@@ -288,7 +290,7 @@ const commands = {
       }
       const [{ callHash, op }] = wanted;
       const found = opt.call ? api.createType('Call', opt.call) : await findOpenedCall(api, op.when, callHash);
-      if (!found) throw new Error(`the call data of ${callHash} was not found on chain (block ${op.when.height}, extrinsic ${op.when.index}).\nPossible causes: the opener used the MEV shield, used approve_as_multi (hash only), or is a Trezor signer (the call is inside an EVM transaction).\nPass --call <0xhex>, or cancel the call and open it again with btcli and --no-mev-shield.`);
+      if (!found) throw new Error(`the call data of ${callHash} was not found on chain (block ${op.when.height}, extrinsic ${op.when.index}).\nPossible causes: the call is older than this node keeps (about 10 hours on mainnet), the opener used the MEV shield, used approve_as_multi (hash only), or is a Trezor signer (the call is inside an EVM transaction).\nPass --call <0xhex>, or cancel the call and open it again with btcli and --no-mev-shield.`);
       if (found.hash.toHex() !== callHash) throw new Error(`--call has hash ${found.hash.toHex()}; the pending call is ${callHash}`);
       // Decode again with the current runtime: that is what executes.
       const call = api.tx(api.createType('Call', found.toHex()));
@@ -322,7 +324,7 @@ const commands = {
       else {
         const held = stakes.filter((s) => s.stake.toString() !== '0');
         console.log(`stake: ${held.length} positions`);
-        for (const s of held) console.log(`- netuid ${s.netuid} hotkey ${encodeAddress(s.hotkey, SS58)}: ${raoToTao(s.stake.toString())} alpha`);
+        for (const s of held) console.log(`- netuid ${s.netuid} hotkey ${encodeAddress(s.hotkey, SS58)}: ${raoToTao(s.stake.toString())} ${Number(s.netuid) === 0 ? 'TAO' : 'alpha'}`);
       }
       const open = await pendingCalls(api, controller);
       console.log(`multisig ${controller}: ${open.length} pending`);
@@ -332,7 +334,7 @@ const commands = {
     }
   },
 
-  'config-check': async () => {
+  check: async () => {
     const from = need('from');
     const signer = ss58Of(need('signer'));
     const signers = signersOpt();
@@ -366,24 +368,33 @@ const commands = {
         const { data } = await api.query.system.account(account);
         console.log(`${label.padEnd(10)} ${raoToTao(data.free)} TAO free, ${raoToTao(data.reserved)} TAO reserved`);
       }
-      if (checks.some(([ok]) => !ok)) throw new Error('config-check FAILED');
+      if (checks.some(([ok]) => !ok)) throw new Error('check FAILED');
     } finally {
       await api.disconnect();
     }
   },
 };
 
+commands['config-check'] = commands.check;
+const VAULT_COMMANDS = ['approve', 'info', 'check', 'config-check'];
+
 const [cmd, ...rest] = positionals;
 if (!commands[cmd]) {
   console.log(USAGE);
   process.exit(cmd ? 1 : 0);
 }
+if (VAULT_COMMANDS.includes(cmd) && rest.length) {
+  const name = rest.shift();
+  if (opt.vault !== undefined && opt.vault !== name) throw new Error(`vault ${name} conflicts with --vault ${opt.vault}`);
+  opt.vault = name;
+}
+if (rest.length && VAULT_COMMANDS.includes(cmd)) throw new Error(`unexpected argument ${rest[0]}\n\n${USAGE}`);
 if (opt.vault)
   for (const [flag, value] of Object.entries(vaultFlags(loadVault(opt.vault)))) {
     if (opt[flag] !== undefined && opt[flag] !== value) throw new Error(`--${flag} ${opt[flag]} conflicts with vault "${opt.vault}" (${flag} ${value})`);
     opt[flag] = value;
   }
-opt.net ??= 'test';
+opt.net ??= 'main';
 opt.threshold ??= '2';
 opt.index ??= '0';
 if (opt.net !== 'test' && opt.net !== 'main') throw new Error('--net must be test or main');

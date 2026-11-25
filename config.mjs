@@ -17,7 +17,7 @@ const validVault = (v, where) => {
     }
   };
   if (!v || typeof v !== 'object') fail('must be an object');
-  if (v.net !== 'test' && v.net !== 'main') fail('net must be test or main');
+  if (v.net !== undefined && v.net !== 'test' && v.net !== 'main') fail('net must be test or main');
   if (!/^0x[0-9a-fA-F]{40}$/.test(v.trezor)) fail('trezor must be a 0x address with 40 hex digits');
   if (!Array.isArray(v.signers) || v.signers.length < 2) fail('signers must list at least 2 addresses');
   v.signers.forEach((s, i) => address(`signers[${i}]`, s));
@@ -27,7 +27,7 @@ const validVault = (v, where) => {
   if (!v.signers.includes(v.signer)) fail('signer is not in signers');
   const threshold = v.threshold ?? 2;
   if (!Number.isInteger(threshold) || threshold < 2 || threshold > v.signers.length) fail(`threshold must be an integer from 2 to ${v.signers.length}`);
-  return { ...v, threshold };
+  return { ...v, net: v.net ?? 'main', threshold };
 };
 
 export const loadVault = (name) => {
