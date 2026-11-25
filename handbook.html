@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>trezor-vault handbook</title>
+<title>trezor-vault cheat sheet</title>
 <style>
 body{font:16px/1.5 system-ui,sans-serif;color:#000;background:#fff;max-width:52rem;margin:0 auto;padding:1rem}
 h1{font-size:1.6rem}h2{font-size:1.3rem;margin-top:2rem;border-bottom:1px solid #000}h3{font-size:1.1rem;margin-top:1.5rem}
@@ -13,68 +13,43 @@ code{overflow-wrap:anywhere}table{border-collapse:collapse;width:100%;margin:.8r
 </style>
 </head>
 <body>
-<h1>trezor-vault handbook</h1>
-<p>How to run a proxied 2-of-3 vault on Bittensor with a Trezor and btcli 11.3.0.</p>
-<h2>Names</h2>
-<table><thead><tr><th>Name</th><th>Meaning</th></tr></thead><tbody><tr><td>vault-N</td><td>Pure proxy that holds the funds. Its only delegate is multisig-N (Any, delay 0).</td></tr><tr><td>multisig-N</td><td>2-of-3 multisig: the btcli signer, the Trezor signer, the backup signer.</td></tr><tr><td>Trezor signer</td><td>Pure proxy that the Trezor controls. It is one of the 3 signers.</td></tr><tr><td><code>&lt;btcli wallet&gt;</code></td><td>btcli wallet of the btcli signer.</td></tr><tr><td>btcli device</td><td>Computer with btcli and the btcli wallet.</td></tr><tr><td>Trezor device</td><td>Computer with this repo, a browser, MetaMask, and the Trezor.</td></tr></tbody></table>
-<p>One person opens a call on the btcli device. The Trezor approves it. The call then runs as vault-N.</p>
-<p>This handbook assumes that the Trezor signer, multisig-N and vault-N exist. To create them, see <code>README.md</code> (<code>create-signer</code>, <code>sign --create-vault</code>).</p>
-<h2>1. One-time setup</h2>
-<h3>Trezor device</h3>
-<ol start="1"><li>Clone the repo: <code>git clone &lt;repo url&gt; ~/trezor-vault &amp;&amp; cd ~/trezor-vault</code></li><li>Check the commit: <code>git rev-parse HEAD</code> must equal the published commit hash.</li><li>Install: <code>npm ci --ignore-scripts</code>. Never run <code>npm install</code> or <code>npm update</code>.</li><li>Create the config file <code>~/.trezor-vault/vaults.json</code>:</li></ol>
+<h1>trezor-vault cheat sheet</h1>
+<p>N = vault number (1, 2, 3). Mainnet is the default.</p>
+<h2>Every action = 2 steps</h2>
+<table><thead><tr><th>Step</th><th>Where</th><th>Type</th></tr></thead><tbody><tr><td>1. Open</td><td>btcli computer</td><td><code>v1 &lt;btcli command&gt;</code> (see the table below)</td></tr><tr><td>2. Approve</td><td>Trezor computer</td><td><code>vault approve 1</code>, read the summary, sign on the Trezor</td></tr></tbody></table>
+<h2>Trezor computer commands</h2>
+<table><thead><tr><th>Do</th><th>Type</th></tr></thead><tbody><tr><td>Approve the open call</td><td><code>vault approve N</code></td></tr><tr><td>Balance, stake, open calls</td><td><code>vault info N</code></td></tr><tr><td>Check the setup</td><td><code>vault check N</code> (3 lines must say <code>OK</code>)</td></tr><tr><td>Approve one of many open calls</td><td><code>vault approve N --hash &lt;0x…&gt;</code></td></tr></tbody></table>
+<h2>btcli computer commands (step 1)</h2>
+<table><thead><tr><th>Do</th><th>Type</th></tr></thead><tbody><tr><td>Pay TAO</td><td><code>v1 wallet transfer --dest &lt;address&gt; --amount &lt;tao&gt;</code></td></tr><tr><td>Stake add</td><td><code>v1 stake add --hotkey &lt;hotkey&gt; --netuid &lt;netuid&gt; --amount &lt;tao&gt;</code></td></tr><tr><td>Stake remove</td><td><code>v1 stake remove --hotkey &lt;hotkey&gt; --netuid &lt;netuid&gt; --amount &lt;alpha&gt;</code></td></tr><tr><td>Unstake all from one hotkey</td><td><code>v1 stake remove --hotkey &lt;hotkey&gt; --netuid &lt;netuid&gt; --all</code></td></tr><tr><td>Unstake everything</td><td><code>v1 stake unstake-all --all-hotkeys</code></td></tr><tr><td>Stake move</td><td><code>v1 stake move --origin-hotkey &lt;hotkey&gt; --dest-hotkey &lt;hotkey&gt; --origin-netuid &lt;netuid&gt; --dest-netuid &lt;netuid&gt; --amount &lt;alpha&gt;</code></td></tr><tr><td>Stake transfer to another coldkey</td><td><code>v1 stake transfer --dest &lt;coldkey&gt; --hotkey &lt;hotkey&gt; --origin-netuid &lt;netuid&gt; --dest-netuid &lt;netuid&gt; --amount &lt;alpha&gt;</code></td></tr><tr><td>List open calls</td><td><code>btcli multisig pending -w multisig-1 -n finney</code></td></tr></tbody></table>
+<p>Use <code>v2</code> or <code>v3</code> for the other vaults. For a stake call, approve within a few minutes. If the price moves, the call fails, nothing moves, and you open it again. For stake transfer, keep both netuids the same: a move to another subnet has no price limit.</p>
+<h2>Before you sign: check the summary</h2>
+<table><thead><tr><th>Line</th><th>Must be</th></tr></thead><tbody><tr><td><code>call hash</code></td><td>Same as the hash that btcli printed</td></tr><tr><td><code>call</code></td><td><code>proxy.proxy(real=… (vault), …)</code>, then your action</td></tr><tr><td>Amounts and addresses</td><td>What you expect, every character</td></tr><tr><td><code>WARNING</code></td><td>Stop if you did not expect it. Any address with no label gives one.</td></tr><tr><td><code>action</code></td><td><code>EXECUTE</code></td></tr></tbody></table>
+<p>After you sign, the output must show <code>"result":"Ok"</code>.</p>
+<h2>One-time setup</h2>
+<h3>Trezor computer</h3>
+<ol start="1"><li><code>cd ~/trezor-vault &amp;&amp; git pull</code>. <code>git rev-parse HEAD</code> must equal the published hash.</li><li><code>npm ci --ignore-scripts</code>. Never <code>npm install</code> or <code>npm update</code>.</li><li><code>~/.trezor-vault/vaults.json</code>, one entry per vault:</li></ol>
 <pre>{
-  "N": {
-    "net": "main",
-    "trezor": "&lt;0x address of the Trezor&gt;",
-    "signer": "&lt;Trezor signer address&gt;",
-    "signers": ["&lt;btcli signer address&gt;", "&lt;Trezor signer address&gt;", "&lt;backup signer address&gt;"],
-    "threshold": 2,
-    "vault": "&lt;vault-N address&gt;"
+  "1": {
+    "trezor": "&lt;Trezor 0x address&gt;",
+    "signer": "&lt;trezor signer 1&gt;",
+    "signers": ["&lt;btcli signer 1&gt;", "&lt;trezor signer 1&gt;", "&lt;backup signer 1&gt;"],
+    "vault": "&lt;vault-1&gt;"
   }
 }</pre>
-<ol start="5"><li>Add the alias to <code>~/.bashrc</code> or <code>~/.zshrc</code>, then open a new terminal:</li></ol>
-<pre>alias vault='node ~/trezor-vault/vault.mjs'</pre>
-<ol start="6"><li>Check the config against the chain:</li></ol>
-<pre>vault config-check --vault N</pre>
-<p>The 3 check lines must start with <code>OK</code>. Stop if a check line starts with <code>FAIL</code>. One <code>FAIL</code> is expected: during a delegate rotation (section 3), between steps 3 and 5, the vault has 2 Any delegates.</p>
-<table><thead><tr><th>Field</th><th>Meaning</th></tr></thead><tbody><tr><td>net</td><td><code>main</code> or <code>test</code></td></tr><tr><td>trezor</td><td>EVM address of the Trezor account in MetaMask</td></tr><tr><td>signer</td><td>The Trezor signer (pure proxy)</td></tr><tr><td>signers</td><td>All 3 signer addresses. All devices must use the same 3.</td></tr><tr><td>threshold</td><td>Approvals needed. Default 2.</td></tr><tr><td>vault</td><td>vault-N</td></tr></tbody></table>
-<h3>btcli device</h3>
-<ol start="1"><li>Save the multisig:</li></ol>
-<pre>btcli multisig add multisig-N --threshold 2 --signatories &lt;btcli wallet&gt;,&lt;Trezor signer address&gt;,&lt;backup signer address&gt;</pre>
-<p>The printed <code>multisig_address</code> must equal the <code>multisig</code> line of <code>vault config-check</code>.</p>
-<ol start="2"><li>Save the vault. <code>&lt;h&gt;</code> and <code>&lt;e&gt;</code> are the <code>height</code> and <code>extIndex</code> that were printed when the vault was created:</li></ol>
-<pre>btcli proxy book add --name vault-N --address &lt;vault-N address&gt; --spawner multisig-N --proxy-type Any --delay 0 --index 0 --height &lt;h&gt; --ext-index &lt;e&gt;</pre>
-<h2>2. Core loop</h2>
-<p>Every action uses the same 3 steps.</p>
-<table><thead><tr><th>Step</th><th>Device</th><th>Do</th></tr></thead><tbody><tr><td>1. Open</td><td>btcli device</td><td>Run the btcli command from the recipe table. Note the printed <code>multisig call hash</code>.</td></tr><tr><td>2. Approve</td><td>Trezor device</td><td>Run <code>vault approve --vault N</code>. Read the summary. Open the printed URL. Sign on the Trezor.</td></tr><tr><td>3. Check</td><td>Trezor device</td><td>The output must show <code>MultisigExecuted</code> with <code>"result":"Ok"</code> and no <code>Error</code>. Then run <code>vault info --vault N</code>.</td></tr></tbody></table>
-<p>Every btcli command that opens a call ends with the same flags:</p>
-<pre>-w multisig-N --signatory &lt;btcli wallet&gt; --proxy-for vault-N --no-mev-shield -n finney</pre>
-<h3>What to check before you sign</h3>
-<p>The Trezor does not show the call. The terminal summary is the only check.</p>
-<table><thead><tr><th>Line</th><th>Must be</th></tr></thead><tbody><tr><td><code>call hash</code></td><td>Equal to the <code>multisig call hash</code> that btcli printed</td></tr><tr><td><code>call</code></td><td><code>proxy.proxy(real=… (vault), …)</code>, then the action you expect</td></tr><tr><td>Amounts</td><td>The amount you expect. Amounts show in TAO or alpha, and in rao.</td></tr><tr><td>Addresses</td><td>Correct in every character. A known address has a label: <code>(vault)</code>, <code>(multisig)</code>, <code>(signer N)</code>, <code>(your Trezor signer)</code>.</td></tr><tr><td><code>WARNING</code></td><td>Read every one. An address with no label always gives a <code>WARNING</code>. Stop if you do not expect a warning.</td></tr><tr><td><code>action</code></td><td><code>EXECUTE</code> for the second approval of a 2-of-3</td></tr></tbody></table>
-<p>If more than one call is open, <code>vault approve --vault N</code> lists them. Run it again with the hash:</p>
-<pre>vault approve --vault N --hash &lt;0x call hash&gt;</pre>
-<h2>3. Recipes</h2>
-<p>Step 1 commands for the btcli device. Then do steps 2 and 3 of the core loop.</p>
-<table><thead><tr><th>Goal</th><th>Command</th></tr></thead><tbody><tr><td>Pay TAO</td><td><code>btcli wallet transfer --dest &lt;address&gt; --amount &lt;tao&gt; -w multisig-N --signatory &lt;btcli wallet&gt; --proxy-for vault-N --no-mev-shield -n finney</code></td></tr><tr><td>Check balance, stake, open calls</td><td><code>vault info --vault N</code> (Trezor device, no signing)</td></tr><tr><td>List open calls on the btcli device</td><td><code>btcli multisig pending -w multisig-N -n finney</code></td></tr><tr><td>Stake add</td><td><code>btcli stake add --hotkey &lt;hotkey address&gt; --netuid &lt;netuid&gt; --amount &lt;tao&gt; -w multisig-N --signatory &lt;btcli wallet&gt; --proxy-for vault-N --no-mev-shield -n finney</code></td></tr><tr><td>Stake remove</td><td><code>btcli stake remove --hotkey &lt;hotkey address&gt; --netuid &lt;netuid&gt; --amount &lt;alpha&gt; -w multisig-N --signatory &lt;btcli wallet&gt; --proxy-for vault-N --no-mev-shield -n finney</code></td></tr><tr><td>Stake move</td><td><code>btcli stake move --origin-hotkey &lt;hotkey address&gt; --dest-hotkey &lt;hotkey address&gt; --origin-netuid &lt;netuid&gt; --dest-netuid &lt;netuid&gt; --amount &lt;alpha&gt; -w multisig-N --signatory &lt;btcli wallet&gt; --proxy-for vault-N --no-mev-shield -n finney</code></td></tr><tr><td>Transfer stake to another coldkey</td><td><code>btcli stake transfer --dest &lt;coldkey address&gt; --hotkey &lt;hotkey address&gt; --origin-netuid &lt;netuid&gt; --dest-netuid &lt;netuid&gt; --amount &lt;alpha&gt; -w multisig-N --signatory &lt;btcli wallet&gt; --proxy-for vault-N --no-mev-shield -n finney</code></td></tr><tr><td>Cancel an open call</td><td>See "Cancel an open call"</td></tr><tr><td>Rotate a vault delegate</td><td>See "Rotate a vault delegate"</td></tr></tbody></table>
-<p>Full example, pay 1.5 TAO:</p>
-<pre>btcli wallet transfer --dest &lt;address&gt; --amount 1.5 -w multisig-N --signatory &lt;btcli wallet&gt; --proxy-for vault-N --no-mev-shield -n finney
-vault approve --vault N
-vault info --vault N</pre>
-<p>Amounts: <code>&lt;tao&gt;</code> is in TAO. <code>&lt;alpha&gt;</code> is in the alpha of the origin subnet.</p>
-<h3>Price limits of stake calls</h3>
-<table><thead><tr><th>Call</th><th>Price limit</th></tr></thead><tbody><tr><td>Stake add</td><td>Yes (5% by default)</td></tr><tr><td>Stake remove</td><td>Yes (5% by default)</td></tr><tr><td>Stake move to another subnet</td><td>Yes (5% by default)</td></tr><tr><td>Stake move in the same subnet</td><td>No. No swap occurs.</td></tr><tr><td>Transfer stake in the same subnet</td><td>No. No swap occurs.</td></tr><tr><td>Transfer stake to another subnet</td><td>No. The swap runs at any price.</td></tr></tbody></table>
-<p>btcli sets the limit when it opens the call. Approve soon after the call is opened. If the price moves past the limit, the call fails with <code>SlippageTooHigh</code>. The tool reports the failure and nothing moves. Open the call again.</p>
-<p>A stake transfer to another subnet has no price protection. To be safe, keep <code>--origin-netuid</code> and <code>--dest-netuid</code> equal.</p>
-<h3>Cancel an open call</h3>
-<p>Only the signer that opened the call can cancel it. Get the hash and the <code>opened at &lt;height&gt;-&lt;index&gt;</code> values from <code>vault info --vault N</code>. The btcli wallet signs this command directly:</p>
-<pre>btcli call Multisig.cancel_as_multi --args '{"threshold":2,"other_signatories":["&lt;signer address A&gt;","&lt;signer address B&gt;"],"timepoint":{"height":&lt;height&gt;,"index":&lt;index&gt;},"call_hash":"&lt;0x call hash&gt;"}' -w &lt;btcli wallet&gt; -n finney</pre>
-<p><code>other_signatories</code> are the 2 signers that are not the btcli wallet. If btcli reports <code>SignatoriesOutOfOrder</code>, swap the 2 addresses and run the command again.</p>
-<h3>Rotate a vault delegate</h3>
-<p>Always add the new delegate first. Remove the old delegate second.</p>
-<ol start="1"><li>Open: <code>btcli proxy add --delegate &lt;new delegate address&gt; --proxy-type Any --delay 0 -w multisig-N --signatory &lt;btcli wallet&gt; --proxy-for vault-N --no-mev-shield -n finney</code></li><li>Approve: <code>vault approve --vault N</code>. A <code>WARNING</code> for <code>proxy.addProxy</code> is correct here.</li><li>Check: <code>vault info --vault N</code> shows both delegates.</li><li>Open: <code>btcli proxy remove --delegate &lt;old delegate address&gt; --proxy-type Any --delay 0 -w multisig-N --signatory &lt;btcli wallet&gt; --proxy-for vault-N --no-mev-shield -n finney</code></li><li>Approve and check again. <code>vault config-check --vault N</code> shows <code>FAIL</code> between steps 3 and 5. It must show 3 <code>OK</code> lines after step 5.</li></ol>
-<p>Every Any delegate can move all funds of the vault. The tool refuses to remove the last Any, delay 0 delegate, because the funds would be lost. If the new delegate is a new multisig, the old multisig must do step 4 before you update <code>vaults.json</code> and the btcli books.</p>
-<h2>4. Troubleshooting</h2>
-<table><thead><tr><th>Message</th><th>Cause</th><th>Fix</th></tr></thead><tbody><tr><td><code>no pending calls</code></td><td>No call is open, or it was already executed</td><td>Run <code>vault info --vault N</code></td></tr><tr><td><code>more than one pending call</code></td><td>Many calls are open</td><td>Run again with <code>--hash &lt;0x call hash&gt;</code></td></tr><tr><td><code>the call data of … was not found on chain</code></td><td>Possible causes: the MEV shield, an open with a hash only, or a call that a Trezor signer opened</td><td>Pass <code>--call &lt;0xhex&gt;</code> (btcli prints <code>multisig call data</code>). Or cancel the call and open it again with btcli and <code>--no-mev-shield</code>.</td></tr><tr><td><code>--call has hash …; the pending call is …</code></td><td>The call hex is not the open call</td><td>Use the <code>multisig call data</code> that btcli printed</td></tr><tr><td><code>… already approved …</code></td><td>The Trezor signer approved this call before</td><td>Another signer must approve</td></tr><tr><td><code>approved, NOT executed</code></td><td>The threshold is not reached</td><td>Another signer must approve</td></tr><tr><td><code>inner call FAILED: …SlippageTooHigh</code></td><td>The price moved past the limit of a stake call</td><td>Nothing moved. Open the call again and approve sooner.</td></tr><tr><td><code>inner call FAILED: proxy.ProxyExecuted …</code></td><td>The call ran and failed (for example, not enough balance)</td><td>Nothing moved. Read the error name, fix the cause, open the call again.</td></tr><tr><td><code>inner call FAILED: utility.BatchInterrupted …</code> or <code>utility.ItemFailed …</code></td><td>One item of a batch failed</td><td>Other items of the batch DID run. Run <code>vault info --vault N</code> and check what moved.</td></tr><tr><td><code>refusing: cannot tell which account runs …</code></td><td>A proxy call is inside a wrapper that changes the account</td><td>Cancel the call. Open it as <code>proxy.proxy</code> directly, or inside a batch.</td></tr><tr><td><code>… is not an Any, delay 0 delegate of …</code></td><td>The multisig does not control that account</td><td>Check <code>signers</code>, <code>threshold</code> and <code>vault</code> in <code>vaults.json</code></td></tr><tr><td><code>… must have exactly one proxy</code></td><td>The Trezor signer has a wrong delegate set</td><td>Stop. Do not sign. Check the Trezor signer on an explorer.</td></tr><tr><td><code>refusing: … is the last Any, delay 0 delegate</code></td><td>The call would lock the vault forever</td><td>Cancel the call</td></tr><tr><td><code>conflicts with vault "N"</code></td><td>A flag is different from <code>vaults.json</code></td><td>Remove the flag, or correct the config</td></tr><tr><td><code>cannot read vault config</code> / <code>no vault "N"</code></td><td>The config file or the name is missing</td><td>Create <code>~/.trezor-vault/vaults.json</code> (section 1)</td></tr><tr><td><code>config-check FAILED</code></td><td>The chain does not match the config</td><td>Stop. Compare each printed address with your records.</td></tr><tr><td><code>evm tx reverted</code></td><td>The EVM transaction failed</td><td>Check that the <code>mirror</code> line of <code>vault config-check</code> shows TAO for fees. Then try again.</td></tr></tbody></table>
+<ol start="4"><li>Add to <code>~/.bashrc</code>: <code>alias vault='node ~/trezor-vault/vault.mjs'</code>. Open a new terminal.</li><li><code>vault check 1</code>, <code>vault check 2</code>, <code>vault check 3</code>.</li></ol>
+<h3>btcli computer</h3>
+<ol start="1"><li>Save each multisig: <code>btcli multisig add multisig-1 --threshold 2 --signatories &lt;btcli wallet&gt;,&lt;trezor signer 1&gt;,&lt;backup signer 1&gt;</code></li><li>Save each vault: <code>btcli proxy book add --name vault-1 --address &lt;vault-1&gt; --spawner multisig-1 --proxy-type Any --delay 0 --index 0 --height &lt;h&gt; --ext-index &lt;e&gt;</code> (<code>&lt;h&gt;</code> and <code>&lt;e&gt;</code> were printed when you created vault-1).</li><li>Add one line per vault to <code>~/.bashrc</code>, then open a new terminal:</li></ol>
+<pre>v1() { btcli "$@" -w multisig-1 --signatory &lt;btcli wallet 1&gt; --proxy-for vault-1 --no-mev-shield -n finney; }</pre>
+<p><code>--no-mev-shield</code> is required. Without it, the Trezor computer cannot read the call.</p>
+<h2>Rare tasks</h2>
+<h3>Cancel an open call (btcli computer)</h3>
+<p>Get <code>&lt;height&gt;-&lt;index&gt;</code> and the hash from <code>vault info N</code>.</p>
+<pre>btcli call Multisig.cancel_as_multi --args '{"threshold":2,"other_signatories":["&lt;trezor signer 1&gt;","&lt;backup signer 1&gt;"],"timepoint":{"height":&lt;height&gt;,"index":&lt;index&gt;},"call_hash":"&lt;0x hash&gt;"}' -w &lt;btcli wallet 1&gt; -n finney</pre>
+<p>If btcli says <code>SignatoriesOutOfOrder</code>, swap the 2 addresses.</p>
+<h3>Replace a vault delegate</h3>
+<p>Add the new one first. Remove the old one second. The tool refuses to remove the last delegate.</p>
+<ol start="1"><li>btcli computer: <code>v1 proxy add --delegate &lt;new&gt; --proxy-type Any --delay 0</code>. Trezor computer: <code>vault approve 1</code>. The <code>WARNING</code> is expected.</li><li>btcli computer: <code>v1 proxy remove --delegate &lt;old&gt; --proxy-type Any --delay 0</code>. Trezor computer: <code>vault approve 1</code>.</li><li>Trezor computer: <code>vault check 1</code> shows 3 <code>OK</code>.</li></ol>
+<h2>Errors</h2>
+<table><thead><tr><th>Message</th><th>Fix</th></tr></thead><tbody><tr><td><code>no pending calls</code></td><td>Nothing is open. Check <code>vault info N</code>.</td></tr><tr><td><code>more than one pending call</code></td><td><code>vault approve N --hash &lt;0x…&gt;</code></td></tr><tr><td><code>call data … not found on chain</code></td><td>btcli opened it without <code>--no-mev-shield</code>. Cancel it and open it again with <code>v1</code>.</td></tr><tr><td><code>approved, NOT executed</code></td><td>One more signer must approve</td></tr><tr><td><code>inner call FAILED: …SlippageTooHigh</code></td><td>Price moved. Nothing moved. Open it again and approve faster.</td></tr><tr><td><code>inner call FAILED: …</code></td><td>The call failed, so nothing moved. Read the error name.</td></tr><tr><td><code>utility.BatchInterrupted</code> / <code>ItemFailed</code></td><td>Part of a batch ran. Check <code>vault info N</code>.</td></tr><tr><td><code>must have exactly one proxy</code>, <code>is not an Any, delay 0 delegate</code>, <code>check FAILED</code></td><td>Stop. Do not sign. Compare the addresses with your papers.</td></tr><tr><td><code>evm tx reverted</code></td><td>The mirror needs TAO for fees (<code>vault check N</code> shows it)</td></tr></tbody></table>
 </body>
 </html>
