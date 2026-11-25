@@ -181,7 +181,12 @@ export function* callTree(call, origin = null, depth = 0) {
 
 // The pending entry stores only the call hash; the opener's as_multi extrinsic carries the full call.
 export const findOpenedCall = async (api, when, callHash) => {
-  const { block } = await api.rpc.chain.getBlock(await api.rpc.chain.getBlockHash(when.height));
+  let block;
+  try {
+    ({ block } = await api.rpc.chain.getBlock(await api.rpc.chain.getBlockHash(when.height)));
+  } catch {
+    return null; // The node no longer keeps that block.
+  }
   const opener = block.extrinsics[when.index.toNumber()];
   for (const { call } of opener ? callTree(opener.method) : [])
     if (api.tx.multisig.asMulti.is(call) && call.args[3].hash.toHex() === callHash) return call.args[3];
